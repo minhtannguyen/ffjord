@@ -11,8 +11,10 @@ from torchvision.utils import save_image
 
 import lib.layers as layers
 import lib.utils as utils
-import lib.odenvp as odenvp
+import lib.odenvp_conditional as odenvp
 import lib.multiscale_parallel as multiscale_parallel
+import lib.modules as modules
+import lib.thops as thops
 
 from train_misc import standard_normal_logprob
 from train_misc import set_cnf_options, count_nfe, count_parameters, count_total_time
@@ -61,6 +63,7 @@ parser.add_argument("--lr", type=float, default=1e-3)
 parser.add_argument("--warmup_iters", type=float, default=1000)
 parser.add_argument("--weight_decay", type=float, default=0.0)
 parser.add_argument("--spectral_norm_niter", type=int, default=10)
+parser.add_argument("--weight_y", type=float, default=0.5)
 
 parser.add_argument("--add_noise", type=eval, default=True, choices=[True, False])
 parser.add_argument("--batch_norm", type=eval, default=False, choices=[True, False])
@@ -251,28 +254,52 @@ def compute_bits_per_dim(x, model):
 
     return bits_per_dim
 
-
-def compute_bits_per_dim_and_xent(x, y, model, size_cond=10):
+def compute_bits_per_dim_conditional(x, y, model):
     zero = torch.zeros(x.shape[0], 1).to(x)
+    y_onehot = thops.onehot(y, num_classes=model.module.y_class).to(x)
 
     # Don't use data parallelize if batch size is small.
     # if x.shape[0] < 200:
     #     model = model.module
     
     z, delta_logp = model(x, zero)  # run model forward
-    z_noise, z_cond = z[:,:-size_cond], z[:,-size_cond:] # split z into z for noise and z for conditional signal
     
-    # compute bits_per_dim
-    logpz = standard_normal_logprob(z_noise).view(z_noise.shape[0], -1).sum(1, keepdim=True)  # logp(z_noise)
+    # prior
+    mean, logs = model.module._prior(y_onehot)
+
+    logpz = modules.GaussianDiag.logp(mean, logs, z)  # logp(z)
     logpx = logpz - delta_logp
+
     logpx_per_dim = torch.sum(logpx) / x.nelement()  # averaged over batches
     bits_per_dim = -(logpx_per_dim - np.log(256)) / np.log(2)
     
     # compute xentropy loss
-    L_xent = torch.nn.CrossEntropyLoss()
-    loss_xent = L_xent(z_cond, y.to(x.get_device()))
+    y_logits = model.module.project_class(z)
+    loss_xent = model.module.loss_class(y_logits, y.to(x.get_device()))
 
     return bits_per_dim, loss_xent
+
+# def compute_bits_per_dim_and_xent(x, y, model, size_cond=10):
+#     zero = torch.zeros(x.shape[0], 1).to(x)
+
+#     # Don't use data parallelize if batch size is small.
+#     # if x.shape[0] < 200:
+#     #     model = model.module
+    
+#     z, delta_logp = model(x, zero)  # run model forward
+#     z_noise, z_cond = z[:,:-size_cond], z[:,-size_cond:] # split z into z for noise and z for conditional signal
+    
+#     # compute bits_per_dim
+#     logpz = standard_normal_logprob(z_noise).view(z_noise.shape[0], -1).sum(1, keepdim=True)  # logp(z_noise)
+#     logpx = logpz - delta_logp
+#     logpx_per_dim = torch.sum(logpx) / x.nelement()  # averaged over batches
+#     bits_per_dim = -(logpx_per_dim - np.log(256)) / np.log(2)
+    
+#     # compute xentropy loss
+#     L_xent = torch.nn.CrossEntropyLoss()
+#     loss_xent = L_xent(z_cond, y.to(x.get_device()))
+
+#     return bits_per_dim, loss_xent
 
 
 def create_model(args, data_shape, regularization_fns):
@@ -393,8 +420,12 @@ if __name__ == "__main__":
         model = torch.nn.DataParallel(model).cuda()
 
     # For visualization.
-    fixed_z = cvt(torch.randn(100, *data_shape))
-
+    fixed_y = torch.randint(high=10, size=(100,)).type(torch.long).to(device, non_blocking=True)
+    fixed_y_onehot = thops.onehot(fixed_y, num_classes=model.module.y_class)
+    with torch.no_grad():
+        mean, logs = model.module._prior(fixed_y_onehot)
+        fixed_z = modules.GaussianDiag.sample(mean, logs)
+    
     time_meter = utils.RunningAverageMeter(0.97)
     loss_meter = utils.RunningAverageMeter(0.97)
     steps_meter = utils.RunningAverageMeter(0.97)
@@ -422,8 +453,8 @@ if __name__ == "__main__":
             
             # compute loss
             if args.conditional:
-                loss_nll, loss_xent = compute_bits_per_dim_and_xent(x, y, model, size_cond=10)
-                loss = loss_nll + loss_xent
+                loss_nll, loss_xent = compute_bits_per_dim_conditional(x, y, model)
+                loss =  loss_nll + args.weight_y * loss_xent
             else:
                 loss = compute_bits_per_dim(x, model)
             
@@ -442,9 +473,13 @@ if __name__ == "__main__":
             optimizer.step()
 
             if args.spectral_norm: spectral_norm_power_iteration(model, args.spectral_norm_niter)
-
+            if regularization_coeffs:
+                loss_track = loss_nll + reg_loss + total_time * args.time_penalty
+            else:
+                loss_track = loss_nll + total_time * args.time_penalty
+            
             time_meter.update(time.time() - start)
-            loss_meter.update(loss.item())
+            loss_meter.update(loss_track.item())
             steps_meter.update(count_nfe(model))
             grad_meter.update(grad_norm)
             tt_meter.update(total_time)
@@ -474,8 +509,12 @@ if __name__ == "__main__":
                     if not args.conv:
                         x = x.view(x.shape[0], -1)
                     x = cvt(x)
-                    loss = compute_bits_per_dim(x, model)
-                    losses.append(loss.cpu().numpy())
+                    if args.conditional:
+                        loss_nll, loss_xent = compute_bits_per_dim_conditional(x, y, model)
+                        # loss =  loss_nll + args.weight_y * loss_xent
+                    else:
+                        loss_nll = compute_bits_per_dim(x, model)
+                    losses.append(loss_nll.cpu().numpy())
                 
                 loss = np.mean(losses)
                 logger.info("Epoch {:04d} | Time {:.4f}, Epoch Time {:.4f}, Bit/dim {:.4f}".format(epoch, time.time() - start, time.time() - start_epoch, loss))

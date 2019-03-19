@@ -11,7 +11,7 @@ from torchvision.utils import save_image
 
 import lib.layers as layers
 import lib.utils as utils
-import lib.odenvp as odenvp
+import lib.odenvp_exploretol3 as odenvp
 import lib.multiscale_parallel as multiscale_parallel
 
 from train_misc import standard_normal_logprob
@@ -286,8 +286,7 @@ def create_model(args, data_shape, regularization_fns):
             intermediate_dims=hidden_dims,
             nonlinearity=args.nonlinearity,
             alpha=args.alpha,
-            cnf_kwargs={"T": args.time_length, "train_T": args.train_T, "regularization_fns": regularization_fns},
-        )
+            cnf_kwargs={"T": args.time_length, "train_T": args.train_T, "regularization_fns": regularization_fns, "solver": args.solver, "atol": args.atol, "rtol": args.rtol},)
     elif args.parallel:
         model = multiscale_parallel.MultiscaleParallelCNF(
             (args.batch_size, *data_shape),

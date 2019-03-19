@@ -289,19 +289,3 @@ class BlendConv2d(nn.Module):
         y0 = self._layer0(x)
         y1 = self._layer1(x)
         return y0 + (y1 - y0) * t
-
-# #####################################################################################################################
-# class ConcatConv2dcond(nn.Module):
-#     def __init__(self, dim_in, dim_out, ksize=3, stride=1, padding=0, dilation=1, groups=1, bias=True, transpose=False):
-#         super(ConcatConv2d, self).__init__()
-#         module = nn.ConvTranspose2d if transpose else nn.Conv2d
-#         self._layer = module(
-#             dim_in + 2, dim_out, kernel_size=ksize, stride=stride, padding=padding, dilation=dilation, groups=groups,
-#             bias=bias
-#         )
-
-#     def forward(self, t, x, c):
-#         tt = torch.ones_like(x[:, :1, :, :]) * t
-#         tc = torch.ones_like(x[:, :1, :, :]) * c
-#         ttcx = torch.cat([tt, tc, x], 1)
-#         return self._layer(ttcx)

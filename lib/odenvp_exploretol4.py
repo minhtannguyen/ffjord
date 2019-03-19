@@ -35,6 +35,7 @@ class ODENVP(nn.Module):
         self.squash_input = squash_input
         self.alpha = alpha
         self.cnf_kwargs = cnf_kwargs if cnf_kwargs else {}
+        self.tolfac_at_scale = [10.**i  for i in range(self.n_scale)]
 
         if not self.n_scale > 0:
             raise ValueError('Could not compute number of scales for input of' 'size (%d,%d,%d,%d)' % input_size)
@@ -56,6 +57,7 @@ class ODENVP(nn.Module):
                     n_blocks=self.n_blocks,
                     cnf_kwargs=self.cnf_kwargs,
                     nonlinearity=self.nonlinearity,
+                    tolfac=self.tolfac_at_scale[i],
                 )
             )
             c, h, w = c * 2, h // 2, w // 2
@@ -147,6 +149,7 @@ class StackedCNFLayers(layers.SequentialFlow):
         init_layer=None,
         n_blocks=1,
         cnf_kwargs={},
+        tolfac=1.,
     ):
         strides = tuple([1] + [1 for _ in idims])
         chain = []
@@ -158,13 +161,19 @@ class StackedCNFLayers(layers.SequentialFlow):
             f = layers.ODEfunc(net)
             return f
         
+        cnf_kwargs_scaled={"T": cnf_kwargs['T'], "train_T": cnf_kwargs['train_T'], "regularization_fns": cnf_kwargs['regularization_fns'], "solver": cnf_kwargs['solver'], "atol": tolfac*cnf_kwargs['atol'], "rtol": tolfac*cnf_kwargs['rtol']}
+        cnf_kwargs_scaled_hightol={"T": cnf_kwargs['T'], "train_T": cnf_kwargs['train_T'], "regularization_fns": cnf_kwargs['regularization_fns'], "solver": cnf_kwargs['solver'], "atol": tolfac*cnf_kwargs['atol']*0.1, "rtol": tolfac*cnf_kwargs['rtol']*0.1}
         if squeeze:
             c, h, w = initial_size
             after_squeeze_size = c * 4, h // 2, w // 2
-            pre = [layers.CNF(_make_odefunc(initial_size), **cnf_kwargs) for _ in range(n_blocks)]
-            post = [layers.CNF(_make_odefunc(after_squeeze_size), **cnf_kwargs) for _ in range(n_blocks)]
+            pre = [layers.CNF(_make_odefunc(initial_size), **cnf_kwargs_scaled_hightol)]
+            for _ in range(n_blocks - 1):
+                pre.append(layers.CNF(_make_odefunc(initial_size), **cnf_kwargs_scaled))
+            post = [layers.CNF(_make_odefunc(after_squeeze_size), **cnf_kwargs_scaled) for _ in range(n_blocks)]
             chain += pre + [layers.SqueezeLayer(2)] + post
+            
         else:
-            chain += [layers.CNF(_make_odefunc(initial_size), **cnf_kwargs) for _ in range(n_blocks)]
+            chain += [layers.CNF(_make_odefunc(initial_size), **cnf_kwargs_scaled_hightol)]
+            chain += [layers.CNF(_make_odefunc(initial_size), **cnf_kwargs_scaled) for _ in range(n_blocks-1)]
 
         super(StackedCNFLayers, self).__init__(chain)

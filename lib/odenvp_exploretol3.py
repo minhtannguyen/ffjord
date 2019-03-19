@@ -158,13 +158,18 @@ class StackedCNFLayers(layers.SequentialFlow):
             f = layers.ODEfunc(net)
             return f
         
+        cnf_kwargs_hightol={"T": cnf_kwargs['T'], "train_T": cnf_kwargs['train_T'], "regularization_fns": cnf_kwargs['regularization_fns'], "solver": cnf_kwargs['solver'], "atol": cnf_kwargs['atol']*0.1, "rtol": cnf_kwargs['rtol']*0.1}
         if squeeze:
             c, h, w = initial_size
             after_squeeze_size = c * 4, h // 2, w // 2
-            pre = [layers.CNF(_make_odefunc(initial_size), **cnf_kwargs) for _ in range(n_blocks)]
+            pre = [layers.CNF(_make_odefunc(initial_size), **cnf_kwargs_hightol)]
+            for _ in range(n_blocks - 1):
+                pre.append(layers.CNF(_make_odefunc(initial_size), **cnf_kwargs_hightol))
             post = [layers.CNF(_make_odefunc(after_squeeze_size), **cnf_kwargs) for _ in range(n_blocks)]
             chain += pre + [layers.SqueezeLayer(2)] + post
         else:
-            chain += [layers.CNF(_make_odefunc(initial_size), **cnf_kwargs) for _ in range(n_blocks)]
+            chain += [layers.CNF(_make_odefunc(initial_size), **cnf_kwargs_hightol)]
+            chain += [layers.CNF(_make_odefunc(initial_size), **cnf_kwargs) for _ in range(n_blocks-1)]
+            
 
         super(StackedCNFLayers, self).__init__(chain)

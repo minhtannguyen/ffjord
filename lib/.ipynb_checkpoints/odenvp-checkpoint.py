@@ -52,14 +52,14 @@ class ODENVP(nn.Module):
                     initial_size=(c, h, w),
                     idims=self.intermediate_dims,
                     squeeze=(i < self.n_scale - 1),  # don't squeeze last layer
-                    init_layer=(layers.LogitTransform(self.alpha) if self.alpha > 0 else layers.ZeroMeanTransform()) if self.squash_input and i == 0 else None,
+                    init_layer=(layers.LogitTransform(self.alpha) if self.alpha > 0 else layers.ZeroMeanTransform())
+                    if self.squash_input and i == 0 else None,
                     n_blocks=self.n_blocks,
                     cnf_kwargs=self.cnf_kwargs,
                     nonlinearity=self.nonlinearity,
                 )
             )
             c, h, w = c * 2, h // 2, w // 2
-        
         return nn.ModuleList(transforms)
 
     def get_regularization(self):
@@ -114,13 +114,11 @@ class ODENVP(nn.Module):
                 # last layer, no factor out
                 factor_out = x
             out.append(factor_out)
-        
         out = [o.view(o.size()[0], -1) for o in out]
         out = torch.cat(out, 1)
         return out if logpx is None else (out, _logpx)
 
     def _generate(self, z, logpz=None):
-        print('do _generate')
         z = z.view(z.shape[0], -1)
         zs = []
         i = 0
@@ -157,7 +155,7 @@ class StackedCNFLayers(layers.SequentialFlow):
             net = ODEnet(idims, size, strides, True, layer_type="concat", nonlinearity=nonlinearity)
             f = layers.ODEfunc(net)
             return f
-        
+
         if squeeze:
             c, h, w = initial_size
             after_squeeze_size = c * 4, h // 2, w // 2

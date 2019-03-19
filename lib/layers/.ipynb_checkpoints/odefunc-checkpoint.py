@@ -276,7 +276,6 @@ class ODEfunc(nn.Module):
 
     def forward(self, t, states):
         assert len(states) >= 2
-        
         y = states[0]
 
         # increment num evals
@@ -292,15 +291,13 @@ class ODEfunc(nn.Module):
                 self._e = sample_rademacher_like(y)
             else:
                 self._e = sample_gaussian_like(y)
-        
-        
+
         with torch.set_grad_enabled(True):
             y.requires_grad_(True)
             t.requires_grad_(True)
             for s_ in states[2:]:
                 s_.requires_grad_(True)
-            
-            dy = self.diffeq(t, y, *states[2:])         
+            dy = self.diffeq(t, y, *states[2:])
             # Hack for 2D data to use brute force divergence computation.
             if not self.training and dy.view(dy.shape[0], -1).shape[1] == 2:
                 divergence = divergence_bf(dy, y).view(batchsize, 1)

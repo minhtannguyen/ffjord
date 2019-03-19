@@ -3,6 +3,8 @@ import torch.nn as nn
 import lib.layers as layers
 from lib.layers.odefunc import ODEnet
 import numpy as np
+from . import modules
+from . import thops
 
 
 class ODENVP(nn.Module):
@@ -26,6 +28,7 @@ class ODENVP(nn.Module):
         squash_input=True,
         alpha=0.05,
         cnf_kwargs=None,
+        y_class=10,
     ):
         super(ODENVP, self).__init__()
         self.n_scale = min(n_scale, self._calc_n_scale(input_size))
@@ -35,6 +38,7 @@ class ODENVP(nn.Module):
         self.squash_input = squash_input
         self.alpha = alpha
         self.cnf_kwargs = cnf_kwargs if cnf_kwargs else {}
+        self.y_class = y_class
 
         if not self.n_scale > 0:
             raise ValueError('Could not compute number of scales for input of' 'size (%d,%d,%d,%d)' % input_size)
@@ -42,6 +46,15 @@ class ODENVP(nn.Module):
         self.transforms = self._build_net(input_size)
 
         self.dims = [o[1:] for o in self.calc_output_size(input_size)]
+        
+        # for conditional
+        C = np.prod(input_size[1:])
+        self.project_ycond = modules.LinearZeros(self.y_class, 2 * C)
+        self.project_class = modules.LinearZeros(C, self.y_class)
+        self.register_parameter(
+            "prior_h",
+            nn.Parameter(torch.zeros([1, 2 * C])))
+        
 
     def _build_net(self, input_size):
         _, c, h, w = input_size
@@ -101,7 +114,20 @@ class ODENVP(nn.Module):
             return self._generate(x, logpx)
         else:
             return self._logdensity(x, logpx)
-
+        
+    def _prior(self, y_onehot=None):
+        # compute the mean and std of the gaussian used to compute logpz
+        h = self.prior_h.detach().clone()
+        
+        assert torch.sum(h) == 0.0
+        assert y_onehot is not None
+        
+        yp = self.project_ycond(y_onehot)
+        h = yp + h
+        
+        return thops.split_feature(h, "split")
+        
+        
     def _logdensity(self, x, logpx=None):
         _logpx = torch.zeros(x.shape[0], 1).to(x) if logpx is None else logpx
         out = []
@@ -117,7 +143,16 @@ class ODENVP(nn.Module):
         
         out = [o.view(o.size()[0], -1) for o in out]
         out = torch.cat(out, 1)
+        
         return out if logpx is None else (out, _logpx)
+    
+    @staticmethod
+    def loss_class(y_logits, y):
+        if y_logits is None:
+            return 0
+        else:
+            CE = torch.nn.CrossEntropyLoss()
+            return CE(y_logits, y.long())
 
     def _generate(self, z, logpz=None):
         print('do _generate')
@@ -158,13 +193,18 @@ class StackedCNFLayers(layers.SequentialFlow):
             f = layers.ODEfunc(net)
             return f
         
+        cnf_kwargs_hightol={"T": cnf_kwargs['T'], "train_T": cnf_kwargs['train_T'], "regularization_fns": cnf_kwargs['regularization_fns'], "solver": cnf_kwargs['solver'], "atol": cnf_kwargs['atol']*0.1, "rtol": cnf_kwargs['rtol']*0.1}
         if squeeze:
             c, h, w = initial_size
             after_squeeze_size = c * 4, h // 2, w // 2
-            pre = [layers.CNF(_make_odefunc(initial_size), **cnf_kwargs) for _ in range(n_blocks)]
+            pre = [layers.CNF(_make_odefunc(initial_size), **cnf_kwargs_hightol)]
+            for _ in range(n_blocks - 1):
+                pre.append(layers.CNF(_make_odefunc(initial_size), **cnf_kwargs))
             post = [layers.CNF(_make_odefunc(after_squeeze_size), **cnf_kwargs) for _ in range(n_blocks)]
             chain += pre + [layers.SqueezeLayer(2)] + post
         else:
-            chain += [layers.CNF(_make_odefunc(initial_size), **cnf_kwargs) for _ in range(n_blocks)]
+            chain += [layers.CNF(_make_odefunc(initial_size), **cnf_kwargs_hightol)]
+            chain += [layers.CNF(_make_odefunc(initial_size), **cnf_kwargs) for _ in range(n_blocks-1)]
+            
 
         super(StackedCNFLayers, self).__init__(chain)
