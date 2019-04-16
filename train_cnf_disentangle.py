@@ -80,6 +80,8 @@ parser.add_argument('--parallel', type=eval, default=False, choices=[True, False
 parser.add_argument('--conditional', type=eval, default=False, choices=[True, False])
 parser.add_argument('--controlled_tol', type=eval, default=False, choices=[True, False])
 parser.add_argument("--train_mode", choices=["semisup", "sup", "unsup"], type=str, default="semisup")
+parser.add_argument("--condition_ratio", type=float, default=0.5)
+
 
 # Regularizations
 parser.add_argument('--l1int', type=float, default=None, help="int_t ||f||_1")
@@ -279,6 +281,10 @@ def compute_bits_per_dim_conditional(x, y, model):
     #     model = model.module
     
     z, delta_logp = model(x, zero)  # run model forward
+    
+    dim_sup = args.condition_ratio * np.prod(z.size()[1:])
+    
+    import ipdb; ipdb.set_trace()
     
     # prior
     mean, logs = model.module._prior(y_onehot)

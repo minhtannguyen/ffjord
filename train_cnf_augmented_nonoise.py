@@ -68,6 +68,7 @@ parser.add_argument("--warmup_iters", type=float, default=1000)
 parser.add_argument("--weight_decay", type=float, default=0.0)
 parser.add_argument("--spectral_norm_niter", type=int, default=10)
 parser.add_argument("--weight_y", type=float, default=0.5)
+parser.add_argument("--concat_size", type=int, default=0)
 
 parser.add_argument("--add_noise", type=eval, default=True, choices=[True, False])
 parser.add_argument("--batch_norm", type=eval, default=False, choices=[True, False])
@@ -124,14 +125,11 @@ if args.layer_type == "blend":
 logger.info(args)
 
 
-def add_noise(x):
+def add_noise_concat(x):
     """
     [0, 1] -> [0, 255] -> add noise -> [0, 1]
     """
-    if args.add_noise:
-        noise = x.new().resize_as_(x).uniform_()
-        x = x * 255 + noise
-        x = x / 256
+    x = torch.cat((x, torch.zeros(args.concat_size, x.shape[1], x.shape[2]).to(x)),0)
     return x
 
 
@@ -157,10 +155,10 @@ def get_train_loader(train_set, epoch):
 
 
 def get_dataset(args):
-    trans = lambda im_size: tforms.Compose([tforms.Resize(im_size), tforms.ToTensor(), add_noise])
+    trans = lambda im_size: tforms.Compose([tforms.Resize(im_size), tforms.ToTensor(), add_noise_concat])
 
     if args.data == "mnist":
-        im_dim = 1
+        im_dim = 1 + args.concat_size
         im_size = 28 if args.imagesize is None else args.imagesize
         train_set = dset.MNIST(root="../data", train=True, transform=trans(im_size), download=True)
         test_set = dset.MNIST(root="../data", train=False, transform=trans(im_size), download=True)
@@ -177,7 +175,7 @@ def get_dataset(args):
                 tforms.Resize(im_size),
                 tforms.RandomHorizontalFlip(),
                 tforms.ToTensor(),
-                add_noise,
+                add_noise_concat,
             ]), download=True
         )
         test_set = dset.CIFAR10(root="../data", train=False, transform=trans(im_size), download=True)
@@ -190,7 +188,7 @@ def get_dataset(args):
                 tforms.Resize(im_size),
                 tforms.RandomHorizontalFlip(),
                 tforms.ToTensor(),
-                add_noise,
+                add_noise_concat,
             ])
         )
         test_set = dset.CelebA(
@@ -198,7 +196,7 @@ def get_dataset(args):
                 tforms.ToPILImage(),
                 tforms.Resize(im_size),
                 tforms.ToTensor(),
-                add_noise,
+                add_noise_concat,
             ])
         )
     elif args.data == 'lsun_church':
@@ -210,7 +208,7 @@ def get_dataset(args):
                 tforms.RandomCrop(64),
                 tforms.Resize(im_size),
                 tforms.ToTensor(),
-                add_noise,
+                add_noise_concat,
             ])
         )
         test_set = dset.LSUN(
@@ -219,7 +217,7 @@ def get_dataset(args):
                 tforms.RandomCrop(64),
                 tforms.Resize(im_size),
                 tforms.ToTensor(),
-                add_noise,
+                add_noise_concat,
             ])
         )    
     elif args.data == 'imagenet_64':
@@ -231,7 +229,7 @@ def get_dataset(args):
                 tforms.Resize(im_size),
                 tforms.RandomHorizontalFlip(),
                 tforms.ToTensor(),
-                add_noise,
+                add_noise_concat,
             ])
         )
         test_set = dset.ImageFolder(
@@ -239,7 +237,7 @@ def get_dataset(args):
                 tforms.ToPILImage(),
                 tforms.Resize(im_size),
                 tforms.ToTensor(),
-                add_noise,
+                add_noise_concat,
             ])
         )
     
@@ -687,5 +685,6 @@ if __name__ == "__main__":
             fig_filename = os.path.join(args.save, "figs", "{:04d}.jpg".format(epoch))
             utils.makedirs(os.path.dirname(fig_filename))
             generated_samples = model(fixed_z, reverse=True).view(-1, *data_shape)
+            generated_samples = generated_samples[:,0:1,:,:]
             save_image(generated_samples, fig_filename, nrow=10)
             writer.add_images('generated_images', generated_samples.repeat(1,3,1,1), epoch)

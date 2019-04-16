@@ -68,6 +68,7 @@ parser.add_argument("--warmup_iters", type=float, default=1000)
 parser.add_argument("--weight_decay", type=float, default=0.0)
 parser.add_argument("--spectral_norm_niter", type=int, default=10)
 parser.add_argument("--weight_y", type=float, default=0.5)
+parser.add_argument("--concat_size", type=int, default=0)
 
 parser.add_argument("--add_noise", type=eval, default=True, choices=[True, False])
 parser.add_argument("--batch_norm", type=eval, default=False, choices=[True, False])
@@ -106,7 +107,7 @@ args = parser.parse_args()
 if args.controlled_tol:
     import lib.odenvp_conditional_tol as odenvp
 else:
-    import lib.odenvp_conditional as odenvp
+    import lib.odenvp_conditional_augment as odenvp
     
 # set seed
 torch.manual_seed(args.seed)
@@ -122,7 +123,6 @@ if args.layer_type == "blend":
     args.time_length = 1.0
 
 logger.info(args)
-
 
 def add_noise(x):
     """
@@ -157,7 +157,7 @@ def get_train_loader(train_set, epoch):
 
 
 def get_dataset(args):
-    trans = lambda im_size: tforms.Compose([tforms.Resize(im_size), tforms.ToTensor(), add_noise])
+    trans = lambda im_size: tforms.Compose([tforms.Resize(im_size), tforms.ToTensor()])
 
     if args.data == "mnist":
         im_dim = 1
@@ -307,7 +307,7 @@ def create_model(args, data_shape, regularization_fns):
             intermediate_dims=hidden_dims,
             nonlinearity=args.nonlinearity,
             alpha=args.alpha,
-            cnf_kwargs={"T": args.time_length, "train_T": args.train_T, "regularization_fns": regularization_fns, "solver": args.solver, "atol": args.atol, "rtol": args.rtol},)
+            cnf_kwargs={"T": args.time_length, "train_T": args.train_T, "regularization_fns": regularization_fns, "solver": args.solver, "atol": args.atol, "rtol": args.rtol, "concat_size": args.concat_size},)
     elif args.parallel:
         model = multiscale_parallel.MultiscaleParallelCNF(
             (args.batch_size, *data_shape),
@@ -683,9 +683,11 @@ if __name__ == "__main__":
                         
 
         # visualize samples and density
-        with torch.no_grad():
-            fig_filename = os.path.join(args.save, "figs", "{:04d}.jpg".format(epoch))
-            utils.makedirs(os.path.dirname(fig_filename))
-            generated_samples = model(fixed_z, reverse=True).view(-1, *data_shape)
-            save_image(generated_samples, fig_filename, nrow=10)
-            writer.add_images('generated_images', generated_samples.repeat(1,3,1,1), epoch)
+        
+#         with torch.no_grad():
+#             fig_filename = os.path.join(args.save, "figs", "{:04d}.jpg".format(epoch))
+#             utils.makedirs(os.path.dirname(fig_filename))
+#             generated_samples = model(fixed_z, reverse=True).view(-1, *data_shape)
+#             generated_samples = generated_samples[:,0:1,:,:]
+#             save_image(generated_samples, fig_filename, nrow=10)
+#             writer.add_images('generated_images', generated_samples.repeat(1,3,1,1), epoch)

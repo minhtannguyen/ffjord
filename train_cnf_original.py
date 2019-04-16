@@ -11,16 +11,13 @@ from torchvision.utils import save_image
 
 import lib.layers as layers
 import lib.utils as utils
+import lib.odenvp as odenvp
 import lib.multiscale_parallel as multiscale_parallel
-import lib.modules as modules
-import lib.thops as thops
 
 from train_misc import standard_normal_logprob
 from train_misc import set_cnf_options, count_nfe, count_parameters, count_total_time
 from train_misc import add_spectral_norm, spectral_norm_power_iteration
 from train_misc import create_regularization_fns, get_regularization, append_regularization_to_log
-
-from tensorboardX import SummaryWriter
 
 # go fast boi!!
 torch.backends.cudnn.benchmark = True
@@ -40,9 +37,6 @@ parser.add_argument("--divergence_fn", type=str, default="approximate", choices=
 parser.add_argument(
     "--nonlinearity", type=str, default="softplus", choices=["tanh", "relu", "softplus", "elu", "swish"]
 )
-
-parser.add_argument("--seed", type=int, default=0)
-
 parser.add_argument('--solver', type=str, default='dopri5', choices=SOLVERS)
 parser.add_argument('--atol', type=float, default=1e-5)
 parser.add_argument('--rtol', type=float, default=1e-5)
@@ -67,7 +61,6 @@ parser.add_argument("--lr", type=float, default=1e-3)
 parser.add_argument("--warmup_iters", type=float, default=1000)
 parser.add_argument("--weight_decay", type=float, default=0.0)
 parser.add_argument("--spectral_norm_niter", type=int, default=10)
-parser.add_argument("--weight_y", type=float, default=0.5)
 
 parser.add_argument("--add_noise", type=eval, default=True, choices=[True, False])
 parser.add_argument("--batch_norm", type=eval, default=False, choices=[True, False])
@@ -77,9 +70,7 @@ parser.add_argument('--rademacher', type=eval, default=True, choices=[True, Fals
 parser.add_argument('--spectral_norm', type=eval, default=False, choices=[True, False])
 parser.add_argument('--multiscale', type=eval, default=False, choices=[True, False])
 parser.add_argument('--parallel', type=eval, default=False, choices=[True, False])
-parser.add_argument('--conditional', type=eval, default=False, choices=[True, False])
 parser.add_argument('--controlled_tol', type=eval, default=False, choices=[True, False])
-parser.add_argument("--train_mode", choices=["semisup", "sup", "unsup"], type=str, default="semisup")
 
 # Regularizations
 parser.add_argument('--l1int', type=float, default=None, help="int_t ||f||_1")
@@ -104,18 +95,13 @@ parser.add_argument("--log_freq", type=int, default=1)
 args = parser.parse_args()
 
 if args.controlled_tol:
-    import lib.odenvp_conditional_tol as odenvp
+    import lib.odenvp_tol as odenvp
 else:
-    import lib.odenvp_conditional as odenvp
-    
-# set seed
-torch.manual_seed(args.seed)
-np.random.seed(args.seed)
+    import lib.odenvp as odenvp
 
 # logger
 utils.makedirs(args.save)
-logger = utils.get_logger(logpath=os.path.join(args.save, 'logs'), filepath=os.path.abspath(__file__)) # write to log file
-writer = SummaryWriter(os.path.join(args.save, 'tensorboard')) # write to tensorboard
+logger = utils.get_logger(logpath=os.path.join(args.save, 'logs'), filepath=os.path.abspath(__file__))
 
 if args.layer_type == "blend":
     logger.info("!! Setting time_length from None to 1.0 due to use of Blend layers.")
@@ -162,25 +148,25 @@ def get_dataset(args):
     if args.data == "mnist":
         im_dim = 1
         im_size = 28 if args.imagesize is None else args.imagesize
-        train_set = dset.MNIST(root="../data", train=True, transform=trans(im_size), download=True)
-        test_set = dset.MNIST(root="../data", train=False, transform=trans(im_size), download=True)
+        train_set = dset.MNIST(root="./data", train=True, transform=trans(im_size), download=True)
+        test_set = dset.MNIST(root="./data", train=False, transform=trans(im_size), download=True)
     elif args.data == "svhn":
         im_dim = 3
         im_size = 32 if args.imagesize is None else args.imagesize
-        train_set = dset.SVHN(root="../data", split="train", transform=trans(im_size), download=True)
-        test_set = dset.SVHN(root="../data", split="test", transform=trans(im_size), download=True)
+        train_set = dset.SVHN(root="./data", split="train", transform=trans(im_size), download=True)
+        test_set = dset.SVHN(root="./data", split="test", transform=trans(im_size), download=True)
     elif args.data == "cifar10":
         im_dim = 3
         im_size = 32 if args.imagesize is None else args.imagesize
         train_set = dset.CIFAR10(
-            root="../data", train=True, transform=tforms.Compose([
+            root="./data", train=True, transform=tforms.Compose([
                 tforms.Resize(im_size),
                 tforms.RandomHorizontalFlip(),
                 tforms.ToTensor(),
                 add_noise,
             ]), download=True
         )
-        test_set = dset.CIFAR10(root="../data", train=False, transform=trans(im_size), download=True)
+        test_set = dset.CIFAR10(root="./data", train=False, transform=trans(im_size), download=True)
     elif args.data == 'celeba':
         im_dim = 3
         im_size = 64 if args.imagesize is None else args.imagesize
@@ -205,7 +191,7 @@ def get_dataset(args):
         im_dim = 3
         im_size = 64 if args.imagesize is None else args.imagesize
         train_set = dset.LSUN(
-            '../data', ['church_outdoor_train'], transform=tforms.Compose([
+            './data', ['church_outdoor_train'], transform=tforms.Compose([
                 tforms.Resize(96),
                 tforms.RandomCrop(64),
                 tforms.Resize(im_size),
@@ -214,7 +200,7 @@ def get_dataset(args):
             ])
         )
         test_set = dset.LSUN(
-            '../data', ['church_outdoor_val'], transform=tforms.Compose([
+            './data', ['church_outdoor_val'], transform=tforms.Compose([
                 tforms.Resize(96),
                 tforms.RandomCrop(64),
                 tforms.Resize(im_size),
@@ -270,31 +256,29 @@ def compute_bits_per_dim(x, model):
 
     return bits_per_dim
 
-def compute_bits_per_dim_conditional(x, y, model):
+
+def compute_bits_per_dim_and_xent(x, y, model, size_cond=10):
     zero = torch.zeros(x.shape[0], 1).to(x)
-    y_onehot = thops.onehot(y, num_classes=model.module.y_class).to(x)
 
     # Don't use data parallelize if batch size is small.
     # if x.shape[0] < 200:
     #     model = model.module
     
     z, delta_logp = model(x, zero)  # run model forward
+    z_noise, z_cond = z[:,:-size_cond], z[:,-size_cond:] # split z into z for noise and z for conditional signal
     
-    # prior
-    mean, logs = model.module._prior(y_onehot)
-
-    logpz = modules.GaussianDiag.logp(mean, logs, z).view(-1,1)  # logp(z)
+    # compute bits_per_dim
+    logpz = standard_normal_logprob(z_noise).view(z_noise.shape[0], -1).sum(1, keepdim=True)  # logp(z_noise)
     logpx = logpz - delta_logp
-
     logpx_per_dim = torch.sum(logpx) / x.nelement()  # averaged over batches
     bits_per_dim = -(logpx_per_dim - np.log(256)) / np.log(2)
     
     # compute xentropy loss
-    y_logits = model.module.project_class(z)
-    loss_xent = model.module.loss_class(y_logits, y.to(x.get_device()))
-    y_predicted = np.argmax(y_logits.cpu().detach().numpy(), axis=1)
+    L_xent = torch.nn.CrossEntropyLoss()
+    loss_xent = L_xent(z_cond, y.to(x.get_device()))
 
-    return bits_per_dim, loss_xent, y_predicted
+    return bits_per_dim, loss_xent
+
 
 def create_model(args, data_shape, regularization_fns):
     hidden_dims = tuple(map(int, args.dims.split(",")))
@@ -393,25 +377,9 @@ if __name__ == "__main__":
 
     logger.info(model)
     logger.info("Number of trainable parameters: {}".format(count_parameters(model)))
-    
-    writer.add_text('info', "Number of trainable parameters: {}".format(count_parameters(model)))
 
     # optimizer
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    
-    # set initial iter
-    itr = 1
-    
-    # set the meters
-    time_epoch_meter = utils.RunningAverageMeter(0.97)
-    time_meter = utils.RunningAverageMeter(0.97)
-    loss_meter = utils.RunningAverageMeter(0.97) # track total loss
-    nll_meter = utils.RunningAverageMeter(0.97) # track negative log-likelihood
-    xent_meter = utils.RunningAverageMeter(0.97) # track xentropy score
-    error_meter = utils.RunningAverageMeter(0.97) # track error score
-    steps_meter = utils.RunningAverageMeter(0.97)
-    grad_meter = utils.RunningAverageMeter(0.97)
-    tt_meter = utils.RunningAverageMeter(0.97)
 
     # restore parameters
     if args.resume is not None:
@@ -424,37 +392,23 @@ if __name__ == "__main__":
                 for k, v in state.items():
                     if torch.is_tensor(v):
                         state[k] = cvt(v)
-        args.begin_epoch = checkpt['epoch'] + 1
-        itr = checkpt['iter'] + 1
-        time_epoch_meter.set(checkpt['epoch_time_avg'])
-        time_meter.set(checkpt['time_train'])
-        loss_meter.set(checkpt['loss_train'])
-        nll_meter.set(checkpt['bits_per_dim_train'])
-        xent_meter.set(checkpt['xent_train'])
-        error_meter.set(checkpt['error_train'])
-        steps_meter.set(checkpt['nfe_train'])
-        grad_meter.set(checkpt['grad_train'])
-        tt_meter.set(checkpt['total_time_train'])
 
     if torch.cuda.is_available():
         model = torch.nn.DataParallel(model).cuda()
 
     # For visualization.
-    if args.conditional:
-        fixed_y = torch.from_numpy(np.arange(model.module.y_class)).repeat(model.module.y_class).type(torch.long).to(device, non_blocking=True)
-        fixed_y_onehot = thops.onehot(fixed_y, num_classes=model.module.y_class)
-        with torch.no_grad():
-            mean, logs = model.module._prior(fixed_y_onehot)
-            fixed_z = modules.GaussianDiag.sample(mean, logs)
-    else:
-        fixed_z = cvt(torch.randn(100, *data_shape))
-    
+    fixed_z = cvt(torch.randn(100, *data_shape))
+
+    time_meter = utils.RunningAverageMeter(0.97)
+    loss_meter = utils.RunningAverageMeter(0.97)
+    steps_meter = utils.RunningAverageMeter(0.97)
+    grad_meter = utils.RunningAverageMeter(0.97)
+    tt_meter = utils.RunningAverageMeter(0.97)
 
     if args.spectral_norm and not args.resume: spectral_norm_power_iteration(model, 500)
 
-    best_loss_nll = float("inf")
-    if args.conditional: best_error_score = float("inf")
-    
+    best_loss = float("inf")
+    itr = 0
     for epoch in range(args.begin_epoch, args.num_epochs + 1):
         start_epoch = time.time()
         model.train()
@@ -472,20 +426,10 @@ if __name__ == "__main__":
             
             # compute loss
             if args.conditional:
-                loss_nll, loss_xent, y_predicted = compute_bits_per_dim_conditional(x, y, model)
-                if args.train_mode == "semisup":
-                    loss =  loss_nll + args.weight_y * loss_xent
-                elif args.train_mode == "sup":
-                    loss =  loss_xent
-                elif args.train_mode == "unsup":
-                    loss =  loss_nll
-                else:
-                    raise ValueError('Choose supported train_mode: semisup, sup, unsup')
-                error_score = 1. - np.mean(y_predicted.astype(int) == y.numpy())   
-                
+                loss_nll, loss_xent = compute_bits_per_dim_and_xent(x, y, model, size_cond=10)
+                loss = loss_nll + loss_xent
             else:
                 loss = compute_bits_per_dim(x, model)
-                loss_nll, loss_xent, error_score = loss, 0., 0.
             
             if regularization_coeffs:
                 reg_states = get_regularization(model, regularization_coeffs)
@@ -502,185 +446,52 @@ if __name__ == "__main__":
             optimizer.step()
 
             if args.spectral_norm: spectral_norm_power_iteration(model, args.spectral_norm_niter)
-            
+
             time_meter.update(time.time() - start)
             loss_meter.update(loss.item())
-            nll_meter.update(loss_nll.item())
-            if args.conditional:
-                xent_meter.update(loss_xent.item())
-            else:
-                xent_meter.update(loss_xent)
-            error_meter.update(error_score)
             steps_meter.update(count_nfe(model))
             grad_meter.update(grad_norm)
             tt_meter.update(total_time)
-            
-            # write to tensorboard
-            writer.add_scalars('time', {'train_iter': time_meter.val}, itr)
-            writer.add_scalars('loss', {'train_iter': loss_meter.val}, itr)
-            writer.add_scalars('bits_per_dim', {'train_iter': nll_meter.val}, itr)
-            writer.add_scalars('xent', {'train_iter': xent_meter.val}, itr)
-            writer.add_scalars('error', {'train_iter': error_meter.val}, itr)
-            writer.add_scalars('nfe', {'train_iter': steps_meter.val}, itr)
-            writer.add_scalars('grad', {'train_iter': grad_meter.val}, itr)
-            writer.add_scalars('total_time', {'train_iter': tt_meter.val}, itr)
 
             if itr % args.log_freq == 0:
                 log_message = (
-                    "Iter {:04d} | Time {:.4f}({:.4f}) | Bit/dim {:.4f}({:.4f}) | Xent {:.4f}({:.4f}) | Loss {:.4f}({:.4f}) | Error {:.4f}({:.4f}) "
+                    "Iter {:04d} | Time {:.4f}({:.4f}) | Bit/dim {:.4f}({:.4f}) | "
                     "Steps {:.0f}({:.2f}) | Grad Norm {:.4f}({:.4f}) | Total Time {:.2f}({:.2f})".format(
-                        itr, time_meter.val, time_meter.avg, nll_meter.val, nll_meter.avg, xent_meter.val, xent_meter.avg, loss_meter.val, loss_meter.avg, error_meter.val, error_meter.avg, steps_meter.val, steps_meter.avg, grad_meter.val, grad_meter.avg, tt_meter.val, tt_meter.avg
+                        itr, time_meter.val, time_meter.avg, loss_meter.val, loss_meter.avg, steps_meter.val,
+                        steps_meter.avg, grad_meter.val, grad_meter.avg, tt_meter.val, tt_meter.avg
                     )
                 )
                 if regularization_coeffs:
                     log_message = append_regularization_to_log(log_message, regularization_fns, reg_states)
                 logger.info(log_message)
-                writer.add_text('info', log_message, itr)
 
             itr += 1
-        
+
         # compute test loss
         model.eval()
         if epoch % args.val_freq == 0:
             with torch.no_grad():
-                # write to tensorboard
-                writer.add_scalars('time', {'train_epoch': time_meter.avg}, epoch)
-                writer.add_scalars('loss', {'train_epoch': loss_meter.avg}, epoch)
-                writer.add_scalars('bits_per_dim', {'train_epoch': nll_meter.avg}, epoch)
-                writer.add_scalars('xent', {'train_epoch': xent_meter.avg}, epoch)
-                writer.add_scalars('error', {'train_epoch': error_meter.avg}, epoch)
-                writer.add_scalars('nfe', {'train_epoch': steps_meter.avg}, epoch)
-                writer.add_scalars('grad', {'train_epoch': grad_meter.avg}, epoch)
-                writer.add_scalars('total_time', {'train_epoch': tt_meter.avg}, epoch)
-                
                 start = time.time()
                 logger.info("validating...")
-                writer.add_text('info', "validating...", epoch)
-                losses_nll = []; losses_xent = []; losses = []
-                total_correct = 0
-                
+                losses = []
                 for (x, y) in test_loader:
                     if not args.conv:
                         x = x.view(x.shape[0], -1)
                     x = cvt(x)
-                    if args.conditional:
-                        loss_nll, loss_xent, y_predicted = compute_bits_per_dim_conditional(x, y, model)
-                        if args.train_mode == "semisup":
-                            loss =  loss_nll + args.weight_y * loss_xent
-                        elif args.train_mode == "sup":
-                            loss =  loss_xent
-                        elif args.train_mode == "unsup":
-                            loss =  loss_nll
-                        else:
-                            raise ValueError('Choose supported train_mode: semisup, sup, unsup')
-                        total_correct += np.sum(y_predicted.astype(int) == y.numpy())
-                    else:
-                        loss = compute_bits_per_dim(x, model)
-                        loss_nll, loss_xent = loss, 0.
-                    losses_nll.append(loss_nll.cpu().numpy()); losses.append(loss.cpu().numpy())
-                    if args.conditional: 
-                        losses_xent.append(loss_xent.cpu().numpy())
-                    else:
-                        losses_xent.append(loss_xent)
+                    loss = compute_bits_per_dim(x, model)
+                    losses.append(loss.cpu().numpy())
                 
-                loss_nll = np.mean(losses_nll); loss_xent = np.mean(losses_xent); loss = np.mean(losses)
-                error_score =  1. - total_correct / len(test_loader.dataset)
-                time_epoch_meter.update(time.time() - start_epoch)
+                loss = np.mean(losses)
+                logger.info("Epoch {:04d} | Time {:.4f}, Epoch Time {:.4f}, Bit/dim {:.4f}".format(epoch, time.time() - start, time.time() - start_epoch, loss))
                 
-                # write to tensorboard
-                test_time_spent = time.time() - start
-                writer.add_scalars('time', {'validation': test_time_spent}, epoch)
-                writer.add_scalars('epoch_time', {'validation': time_epoch_meter.val}, epoch)
-                writer.add_scalars('bits_per_dim', {'validation': loss_nll}, epoch)
-                writer.add_scalars('xent', {'validation': loss_xent}, epoch)
-                writer.add_scalars('loss', {'validation': loss}, epoch)
-                writer.add_scalars('error', {'validation': error_score}, epoch)
-                
-                log_message = "Epoch {:04d} | Time {:.4f}, Epoch Time {:.4f}({:.4f}), Bit/dim {:.4f}, Xent {:.4f}, Loss {:.4f}, Error {:.4f}".format(epoch, time.time() - start, time_epoch_meter.val, time_epoch_meter.avg, loss_nll, loss_xent, loss, error_score)
-                logger.info(log_message)
-                writer.add_text('info', log_message, epoch)
-                
-                for name, param in model.named_parameters():
-                    writer.add_histogram(name, param.clone().cpu().data.numpy(), epoch)
-                    
-                
-                utils.makedirs(args.save)
-                torch.save({
-                        "args": args,
-                        "state_dict": model.module.state_dict() if torch.cuda.is_available() else model.state_dict(),
-                        "optim_state_dict": optimizer.state_dict(),
-                        "epoch": epoch,
-                        "iter": itr-1,
-                        "error": error_score,
-                        "loss": loss,
-                        "xent": loss_xent,
-                        "bits_per_dim": loss_nll,
-                        "epoch_time": time_epoch_meter.val,
-                        "epoch_time_avg": time_epoch_meter.avg,
-                        "time": test_time_spent,
-                        "error_train": error_meter.avg,
-                        "loss_train": loss_meter.avg,
-                        "xent_train": xent_meter.avg,
-                        "bits_per_dim_train": nll_meter.avg,
-                        "total_time_train": tt_meter.avg,
-                        "time_train": time_meter.avg,
-                        "nfe_train": steps_meter.avg,
-                        "grad_train": grad_meter.avg,
-                    }, os.path.join(args.save, "current_checkpt.pth"))
-                
-                if loss_nll < best_loss_nll:
-                    best_loss_nll = loss_nll
+                if loss < best_loss:
+                    best_loss = loss
                     utils.makedirs(args.save)
                     torch.save({
                         "args": args,
                         "state_dict": model.module.state_dict() if torch.cuda.is_available() else model.state_dict(),
                         "optim_state_dict": optimizer.state_dict(),
-                        "epoch": epoch,
-                        "iter": itr-1,
-                        "error": error_score,
-                        "loss": loss,
-                        "xent": loss_xent,
-                        "bits_per_dim": loss_nll,
-                        "epoch_time": time_epoch_meter.val,
-                        "epoch_time_avg": time_epoch_meter.avg,
-                        "time": test_time_spent,
-                        "error_train": error_meter.avg,
-                        "loss_train": loss_meter.avg,
-                        "xent_train": xent_meter.avg,
-                        "bits_per_dim_train": nll_meter.avg,
-                        "total_time_train": tt_meter.avg,
-                        "time_train": time_meter.avg,
-                        "nfe_train": steps_meter.avg,
-                        "grad_train": grad_meter.avg,
-                    }, os.path.join(args.save, "best_nll_checkpt.pth"))
-                    
-                if args.conditional:
-                    if error_score < best_error_score:
-                        best_error_score = error_score
-                        utils.makedirs(args.save)
-                        torch.save({
-                            "args": args,
-                            "state_dict": model.module.state_dict() if torch.cuda.is_available() else model.state_dict(),
-                            "optim_state_dict": optimizer.state_dict(),
-                            "epoch": epoch,
-                            "iter": itr-1,
-                            "error": error_score,
-                            "loss": loss,
-                            "xent": loss_xent,
-                            "bits_per_dim": loss_nll,
-                            "epoch_time": time_epoch_meter.val,
-                            "epoch_time_avg": time_epoch_meter.avg,
-                            "time": test_time_spent,
-                            "error_train": error_meter.avg,
-                            "loss_train": loss_meter.avg,
-                            "xent_train": xent_meter.avg,
-                            "bits_per_dim_train": nll_meter.avg,
-                            "total_time_train": tt_meter.avg,
-                            "time_train": time_meter.avg,
-                            "nfe_train": steps_meter.avg,
-                            "grad_train": grad_meter.avg,
-                        }, os.path.join(args.save, "best_error_checkpt.pth"))
-                        
+                    }, os.path.join(args.save, "checkpt.pth"))
 
         # visualize samples and density
         with torch.no_grad():
@@ -688,4 +499,3 @@ if __name__ == "__main__":
             utils.makedirs(os.path.dirname(fig_filename))
             generated_samples = model(fixed_z, reverse=True).view(-1, *data_shape)
             save_image(generated_samples, fig_filename, nrow=10)
-            writer.add_images('generated_images', generated_samples.repeat(1,3,1,1), epoch)
