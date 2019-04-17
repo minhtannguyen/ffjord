@@ -81,6 +81,7 @@ parser.add_argument('--conditional', type=eval, default=False, choices=[True, Fa
 parser.add_argument('--controlled_tol', type=eval, default=False, choices=[True, False])
 parser.add_argument("--train_mode", choices=["semisup", "sup", "unsup"], type=str, default="semisup")
 parser.add_argument("--condition_ratio", type=float, default=0.5)
+parser.add_argument("--dropout_rate", type=float, default=0.0)
 
 
 # Regularizations
@@ -282,21 +283,27 @@ def compute_bits_per_dim_conditional(x, y, model):
     
     z, delta_logp = model(x, zero)  # run model forward
     
-    dim_sup = args.condition_ratio * np.prod(z.size()[1:])
-    
-    import ipdb; ipdb.set_trace()
+    dim_sup = int(args.condition_ratio * np.prod(z.size()[1:]))
     
     # prior
     mean, logs = model.module._prior(y_onehot)
 
-    logpz = modules.GaussianDiag.logp(mean, logs, z).view(-1,1)  # logp(z)
+    logpz_sup = modules.GaussianDiag.logp(mean, logs, z[:, 0:dim_sup]).view(-1,1)  # logp(z)_sup
+    logpz_unsup = standard_normal_logprob(z[:, dim_sup:]).view(z.shape[0], -1).sum(1, keepdim=True)
+    logpz = logpz_sup + logpz_unsup
     logpx = logpz - delta_logp
 
     logpx_per_dim = torch.sum(logpx) / x.nelement()  # averaged over batches
     bits_per_dim = -(logpx_per_dim - np.log(256)) / np.log(2)
     
+    # dropout
+    if args.dropout_rate > 0:
+        zsup = model.module.dropout(z[:, 0:dim_sup])
+    else:
+        zsup = z[:, 0:dim_sup]
+    
     # compute xentropy loss
-    y_logits = model.module.project_class(z)
+    y_logits = model.module.project_class(zsup)
     loss_xent = model.module.loss_class(y_logits, y.to(x.get_device()))
     y_predicted = np.argmax(y_logits.cpu().detach().numpy(), axis=1)
 
@@ -313,7 +320,9 @@ def create_model(args, data_shape, regularization_fns):
             intermediate_dims=hidden_dims,
             nonlinearity=args.nonlinearity,
             alpha=args.alpha,
-            cnf_kwargs={"T": args.time_length, "train_T": args.train_T, "regularization_fns": regularization_fns, "solver": args.solver, "atol": args.atol, "rtol": args.rtol},)
+            cnf_kwargs={"T": args.time_length, "train_T": args.train_T, "regularization_fns": regularization_fns, "solver": args.solver, "atol": args.atol, "rtol": args.rtol},
+            condition_ratio=args.condition_ratio,
+            dropout_rate=args.dropout_rate,)
     elif args.parallel:
         model = multiscale_parallel.MultiscaleParallelCNF(
             (args.batch_size, *data_shape),
@@ -447,11 +456,14 @@ if __name__ == "__main__":
 
     # For visualization.
     if args.conditional:
+        dim_unsup = int((1.0 - args.condition_ratio) * np.prod(data_shape))
         fixed_y = torch.from_numpy(np.arange(model.module.y_class)).repeat(model.module.y_class).type(torch.long).to(device, non_blocking=True)
         fixed_y_onehot = thops.onehot(fixed_y, num_classes=model.module.y_class)
         with torch.no_grad():
             mean, logs = model.module._prior(fixed_y_onehot)
-            fixed_z = modules.GaussianDiag.sample(mean, logs)
+            fixed_z_sup = modules.GaussianDiag.sample(mean, logs)
+            fixed_z_unsup = cvt(torch.randn(model.module.y_class**2, dim_unsup))
+            fixed_z = torch.cat((fixed_z_sup, fixed_z_unsup),1)
     else:
         fixed_z = cvt(torch.randn(100, *data_shape))
     
