@@ -8,3 +8,7 @@ from . import diffeq_layers
 from .coupling import *
 from .glow import *
 from .norm_flows import *
+from .cnf_gate import *
+from .container_gate import *
+from .gate import *
+from .cnf_augment import *

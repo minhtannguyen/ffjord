@@ -1,3 +1,5 @@
 *__pycache__*
 *.pyc
 data/*
+experiments/*
+experiments_published/*

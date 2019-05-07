@@ -120,7 +120,6 @@ class ODENVP(nn.Module):
         return out if logpx is None else (out, _logpx)
 
     def _generate(self, z, logpz=None):
-        print('do _generate')
         z = z.view(z.shape[0], -1)
         zs = []
         i = 0

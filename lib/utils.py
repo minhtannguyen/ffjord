@@ -66,6 +66,10 @@ class RunningAverageMeter(object):
     def reset(self):
         self.val = None
         self.avg = 0
+    
+    def set(self, avg):
+        self.avg = avg
+        self.val = avg
 
     def update(self, val):
         if self.val is None:
