@@ -725,4 +725,7 @@ if __name__ == "__main__":
             utils.makedirs(os.path.dirname(fig_filename))
             generated_samples = model(fixed_z, reverse=True).view(-1, *data_shape)
             save_image(generated_samples, fig_filename, nrow=10)
-            writer.add_images('generated_images', generated_samples.repeat(1,3,1,1), epoch)
+            if args.data == "mnist":
+                writer.add_images('generated_images', generated_samples.repeat(1,3,1,1), epoch)
+            else:
+                writer.add_images('generated_images', generated_samples.repeat(1,1,1,1), epoch)

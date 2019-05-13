@@ -14,7 +14,6 @@ import lib.utils as utils
 import lib.multiscale_parallel as multiscale_parallel
 import lib.modules as modules
 import lib.thops as thops
-import lib.odenvp_conditional_v3 as odenvp
 
 from train_misc import standard_normal_logprob
 from train_misc import set_cnf_options, count_nfe, count_parameters, count_total_time
@@ -26,6 +25,8 @@ from tensorboardX import SummaryWriter
 # go fast boi!!
 torch.backends.cudnn.benchmark = True
 SOLVERS = ["dopri5", "bdf", "rk4", "midpoint", 'adams', 'explicit_adams']
+GATES = ["cnn1", "cnn2", "rnn"]
+
 parser = argparse.ArgumentParser("Continuous Normalizing Flow")
 parser.add_argument("--data", choices=["mnist", "svhn", "cifar10", 'lsun_church'], type=str, default="mnist")
 parser.add_argument("--dims", type=str, default="8,32,32,8")
@@ -49,6 +50,17 @@ parser.add_argument('--atol', type=float, default=1e-5)
 parser.add_argument('--rtol', type=float, default=1e-5)
 parser.add_argument("--step_size", type=float, default=None, help="Optional fixed step size.")
 
+parser.add_argument('--gate', type=str, default='cnn1', choices=GATES)
+parser.add_argument('--scale', type=float, default=1.0)
+parser.add_argument('--eta', default=0.1, type=float,
+                        help='tuning parameter that allows us to trade-off the competing goals of' 
+                                'minimizing the prediction loss and maximizing the gate rewards ')
+parser.add_argument('--rl-weight', default=0.01, type=float,
+                        help='rl weight')
+
+parser.add_argument('--gamma', default=0.99, type=float,
+                        help='discount factor, default: (0.99)')
+
 parser.add_argument('--test_solver', type=str, default=None, choices=SOLVERS + [None])
 parser.add_argument('--test_atol', type=float, default=None)
 parser.add_argument('--test_rtol', type=float, default=None)
@@ -69,7 +81,6 @@ parser.add_argument("--warmup_iters", type=float, default=1000)
 parser.add_argument("--weight_decay", type=float, default=0.0)
 parser.add_argument("--spectral_norm_niter", type=int, default=10)
 parser.add_argument("--weight_y", type=float, default=0.5)
-parser.add_argument('--scale_tol', type=float, default=1.0)
 
 parser.add_argument("--add_noise", type=eval, default=True, choices=[True, False])
 parser.add_argument("--batch_norm", type=eval, default=False, choices=[True, False])
@@ -80,7 +91,11 @@ parser.add_argument('--spectral_norm', type=eval, default=False, choices=[True, 
 parser.add_argument('--multiscale', type=eval, default=False, choices=[True, False])
 parser.add_argument('--parallel', type=eval, default=False, choices=[True, False])
 parser.add_argument('--conditional', type=eval, default=False, choices=[True, False])
+parser.add_argument('--controlled_tol', type=eval, default=False, choices=[True, False])
 parser.add_argument("--train_mode", choices=["semisup", "sup", "unsup"], type=str, default="semisup")
+parser.add_argument("--condition_ratio", type=float, default=0.5)
+parser.add_argument("--dropout_rate", type=float, default=0.0)
+
 
 # Regularizations
 parser.add_argument('--l1int', type=float, default=None, help="int_t ||f||_1")
@@ -103,6 +118,8 @@ parser.add_argument("--val_freq", type=int, default=1)
 parser.add_argument("--log_freq", type=int, default=1)
 
 args = parser.parse_args()
+
+import lib.odenvp_conditional_rl_sep as odenvp
     
 # set seed
 torch.manual_seed(args.seed)
@@ -256,7 +273,7 @@ def compute_bits_per_dim(x, model):
     # if x.shape[0] < 200:
     #     model = model.module
     
-    z, delta_logp = model(x, zero)  # run model forward
+    z, delta_logp, atol, rtol, logp_actions, nfe = model(x, zero)  # run model forward
 
     logpz = standard_normal_logprob(z).view(z.shape[0], -1).sum(1, keepdim=True)  # logp(z)
     logpx = logpz - delta_logp
@@ -264,7 +281,7 @@ def compute_bits_per_dim(x, model):
     logpx_per_dim = torch.sum(logpx) / x.nelement()  # averaged over batches
     bits_per_dim = -(logpx_per_dim - np.log(256)) / np.log(2)
 
-    return bits_per_dim
+    return bits_per_dim, atol, rtol, logp_actions, nfe
 
 def compute_bits_per_dim_conditional(x, y, model):
     zero = torch.zeros(x.shape[0], 1).to(x)
@@ -274,23 +291,33 @@ def compute_bits_per_dim_conditional(x, y, model):
     # if x.shape[0] < 200:
     #     model = model.module
     
-    z, delta_logp = model(x, zero)  # run model forward
+    z, delta_logp, atol, rtol, logp_actions, nfe = model(x, zero)  # run model forward
+    
+    dim_sup = int(args.condition_ratio * np.prod(z.size()[1:]))
     
     # prior
     mean, logs = model.module._prior(y_onehot)
 
-    logpz = modules.GaussianDiag.logp(mean, logs, z).view(-1,1)  # logp(z)
+    logpz_sup = modules.GaussianDiag.logp(mean, logs, z[:, 0:dim_sup]).view(-1,1)  # logp(z)_sup
+    logpz_unsup = standard_normal_logprob(z[:, dim_sup:]).view(z.shape[0], -1).sum(1, keepdim=True)
+    logpz = logpz_sup + logpz_unsup
     logpx = logpz - delta_logp
 
     logpx_per_dim = torch.sum(logpx) / x.nelement()  # averaged over batches
     bits_per_dim = -(logpx_per_dim - np.log(256)) / np.log(2)
     
+    # dropout
+    if args.dropout_rate > 0:
+        zsup = model.module.dropout(z[:, 0:dim_sup])
+    else:
+        zsup = z[:, 0:dim_sup]
+    
     # compute xentropy loss
-    y_logits = model.module.project_class(z)
+    y_logits = model.module.project_class(zsup)
     loss_xent = model.module.loss_class(y_logits, y.to(x.get_device()))
     y_predicted = np.argmax(y_logits.cpu().detach().numpy(), axis=1)
 
-    return bits_per_dim, loss_xent, y_predicted
+    return bits_per_dim, loss_xent, y_predicted, atol, rtol, logp_actions, nfe
 
 def create_model(args, data_shape, regularization_fns):
     hidden_dims = tuple(map(int, args.dims.split(",")))
@@ -303,8 +330,9 @@ def create_model(args, data_shape, regularization_fns):
             intermediate_dims=hidden_dims,
             nonlinearity=args.nonlinearity,
             alpha=args.alpha,
-            scale_tol=args.scale_tol,
-            cnf_kwargs={"T": args.time_length, "train_T": args.train_T, "regularization_fns": regularization_fns, "solver": args.solver, "atol": args.atol, "rtol": args.rtol},)
+            cnf_kwargs={"T": args.time_length, "train_T": args.train_T, "regularization_fns": regularization_fns, "solver": args.solver, "atol_forward": args.atol, "rtol_forward": args.rtol, "atol_reverse": args.atol, "rtol_reverse": args.rtol, "scale": args.scale, "gate": args.gate},
+            condition_ratio=args.condition_ratio,
+            dropout_rate=args.dropout_rate,)
     elif args.parallel:
         model = multiscale_parallel.MultiscaleParallelCNF(
             (args.batch_size, *data_shape),
@@ -438,11 +466,14 @@ if __name__ == "__main__":
 
     # For visualization.
     if args.conditional:
+        dim_unsup = int((1.0 - args.condition_ratio) * np.prod(data_shape))
         fixed_y = torch.from_numpy(np.arange(model.module.y_class)).repeat(model.module.y_class).type(torch.long).to(device, non_blocking=True)
         fixed_y_onehot = thops.onehot(fixed_y, num_classes=model.module.y_class)
         with torch.no_grad():
             mean, logs = model.module._prior(fixed_y_onehot)
-            fixed_z = modules.GaussianDiag.sample(mean, logs)
+            fixed_z_sup = modules.GaussianDiag.sample(mean, logs)
+            fixed_z_unsup = cvt(torch.randn(model.module.y_class**2, dim_unsup))
+            fixed_z = torch.cat((fixed_z_sup, fixed_z_unsup),1)
     else:
         fixed_z = cvt(torch.randn(100, *data_shape))
     
@@ -469,7 +500,7 @@ if __name__ == "__main__":
             
             # compute loss
             if args.conditional:
-                loss_nll, loss_xent, y_predicted = compute_bits_per_dim_conditional(x, y, model)
+                loss_nll, loss_xent, y_predicted, atol, rtol, logp_actions, nfe = compute_bits_per_dim_conditional(x, y, model)
                 if args.train_mode == "semisup":
                     loss =  loss_nll + args.weight_y * loss_xent
                 elif args.train_mode == "sup":
@@ -481,7 +512,7 @@ if __name__ == "__main__":
                 error_score = 1. - np.mean(y_predicted.astype(int) == y.numpy())   
                 
             else:
-                loss = compute_bits_per_dim(x, model)
+                loss, atol, rtol, logp_actions, nfe = compute_bits_per_dim(x, model)
                 loss_nll, loss_xent, error_score = loss, 0., 0.
             
             if regularization_coeffs:
@@ -492,7 +523,24 @@ if __name__ == "__main__":
                 loss = loss + reg_loss
             total_time = count_total_time(model)
             loss = loss + total_time * args.time_penalty
-
+            
+            # re-weight the gate rewards
+            normalized_eta = args.eta / len(logp_actions)
+            
+            # collect cumulative future rewards
+            R = - loss
+            cum_rewards = []
+            for r in nfe[::-1]:
+                R = normalized_eta * r.view(-1,1) + args.gamma * R
+                cum_rewards.insert(0,R)
+            
+            # apply REINFORCE
+            rl_loss = 0
+            for lpa, r in zip(logp_actions, cum_rewards):
+                rl_loss = rl_loss - lpa.view(-1,1) * args.rl_weight * r
+                
+            loss = loss + rl_loss.mean()
+            
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
 
@@ -523,6 +571,10 @@ if __name__ == "__main__":
             writer.add_scalars('total_time', {'train_iter': tt_meter.val}, itr)
 
             if itr % args.log_freq == 0:
+                for tol_indx in range(len(atol)):
+                    writer.add_scalars('atol_%i'%tol_indx, {'train': atol[tol_indx].mean()}, itr)
+                    writer.add_scalars('rtol_%i'%tol_indx, {'train': rtol[tol_indx].mean()}, itr)
+                    
                 log_message = (
                     "Iter {:04d} | Time {:.4f}({:.4f}) | Bit/dim {:.4f}({:.4f}) | Xent {:.4f}({:.4f}) | Loss {:.4f}({:.4f}) | Error {:.4f}({:.4f}) "
                     "Steps {:.0f}({:.2f}) | Grad Norm {:.4f}({:.4f}) | Total Time {:.2f}({:.2f})".format(
@@ -561,7 +613,7 @@ if __name__ == "__main__":
                         x = x.view(x.shape[0], -1)
                     x = cvt(x)
                     if args.conditional:
-                        loss_nll, loss_xent, y_predicted = compute_bits_per_dim_conditional(x, y, model)
+                        loss_nll, loss_xent, y_predicted, atol, rtol, logp_actions, nfe = compute_bits_per_dim_conditional(x, y, model)
                         if args.train_mode == "semisup":
                             loss =  loss_nll + args.weight_y * loss_xent
                         elif args.train_mode == "sup":
@@ -572,7 +624,7 @@ if __name__ == "__main__":
                             raise ValueError('Choose supported train_mode: semisup, sup, unsup')
                         total_correct += np.sum(y_predicted.astype(int) == y.numpy())
                     else:
-                        loss = compute_bits_per_dim(x, model)
+                        loss, atol, rtol, logp_actions, nfe = compute_bits_per_dim(x, model)
                         loss_nll, loss_xent = loss, 0.
                     losses_nll.append(loss_nll.cpu().numpy()); losses.append(loss.cpu().numpy())
                     if args.conditional: 
@@ -592,6 +644,10 @@ if __name__ == "__main__":
                 writer.add_scalars('xent', {'validation': loss_xent}, epoch)
                 writer.add_scalars('loss', {'validation': loss}, epoch)
                 writer.add_scalars('error', {'validation': error_score}, epoch)
+                
+                for tol_indx in range(len(atol)):
+                    writer.add_scalars('atol_%i'%tol_indx, {'validation': atol[tol_indx].mean()}, epoch)
+                    writer.add_scalars('rtol_%i'%tol_indx, {'validation': rtol[tol_indx].mean()}, epoch)
                 
                 log_message = "Epoch {:04d} | Time {:.4f}, Epoch Time {:.4f}({:.4f}), Bit/dim {:.4f}(best: {:.4f}), Xent {:.4f}, Loss {:.4f}, Error {:.4f}(best: {:.4f})".format(epoch, time.time() - start, time_epoch_meter.val, time_epoch_meter.avg, loss_nll, best_loss_nll, loss_xent, loss, error_score, best_error_score)
                 logger.info(log_message)
@@ -714,7 +770,11 @@ if __name__ == "__main__":
         with torch.no_grad():
             fig_filename = os.path.join(args.save, "figs", "{:04d}.jpg".format(epoch))
             utils.makedirs(os.path.dirname(fig_filename))
-            generated_samples = model(fixed_z, reverse=True).view(-1, *data_shape)
+            generated_samples, atol, rtol, logp_actions, nfe = model(fixed_z, reverse=True)
+            generated_samples = generated_samples.view(-1, *data_shape)
+            for tol_indx in range(len(atol)):
+                writer.add_scalars('atol_gen_%i'%tol_indx, {'validation': atol[tol_indx].mean()}, epoch)
+                writer.add_scalars('rtol_gen_%i'%tol_indx, {'validation': rtol[tol_indx].mean()}, epoch)
             save_image(generated_samples, fig_filename, nrow=10)
             if args.data == "mnist":
                 writer.add_images('generated_images', generated_samples.repeat(1,3,1,1), epoch)

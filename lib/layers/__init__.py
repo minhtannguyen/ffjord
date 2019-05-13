@@ -12,3 +12,5 @@ from .cnf_gate import *
 from .container_gate import *
 from .gate import *
 from .cnf_augment import *
+from .cnf_gate_sep import *
+from .odefunc_rl import *

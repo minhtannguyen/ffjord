@@ -7,7 +7,7 @@ import math
 from torch.autograd import Variable
 import torch.autograd as autograd
 
-from .wrappers.cnf_regularization import RegularizedODEfunc
+from .wrappers.cnf_regularization_rl import RegularizedODEfunc
 from .gate import FeedforwardGateI, FeedforwardGateII
 
 __all__ = ["CNF_Gate"]
@@ -18,7 +18,7 @@ GATES = {
 }
 
 class CNF_Gate(nn.Module):
-    def __init__(self, odefunc, size, T=1.0, train_T=False, regularization_fns=None, solver='dopri5', atol=1e-5, rtol=1e-5, scale=1.0, gate='cnn1'):
+    def __init__(self, odefunc, size, T=1.0, train_T=False, regularization_fns=None, solver='dopri5', atol=1e-5, rtol=1e-5, scale=1.0, scale_fac=1.0, scale_std=1.0, gate='cnn1'):
         super(CNF_Gate, self).__init__()
         if train_T:
             self.register_parameter("sqrt_end_time", nn.Parameter(torch.sqrt(torch.tensor(T))))
@@ -31,7 +31,7 @@ class CNF_Gate(nn.Module):
             nreg = len(regularization_fns)
         
         self.gate = gate
-        self.gate_net = GATES[gate](in_channel=size, out_channel=10, pool_size=5)
+        self.gate_net = GATES[gate](in_channel=size, out_channel=10)
         self.odefunc = odefunc
         self.nreg = nreg
         self.regularization_states = None
@@ -43,6 +43,8 @@ class CNF_Gate(nn.Module):
         self.test_rtol = rtol
         self.solver_options = {}
         self.scale = scale
+        self.scale_fac = scale_fac
+        self.scale_std = scale_std
 
     def forward(self, z, logpz=None, integration_times=None, reverse=False):
 
@@ -57,12 +59,37 @@ class CNF_Gate(nn.Module):
             integration_times = _flip(integration_times, 0)
             
         # compute atol and rtol
-        tol_val = self.gate_net(z)
-        tol_val = self.scale * torch.mean(tol_val, dim=0)
-        atol_val = tol_val[0]
-        rtol_val = tol_val[1]
-        test_atol_val = atol_val
-        test_rtol_val = rtol_val
+#         mean_var = self.gate_net(z)
+#         mean_tol = torch.mean(mean_var[:,0], dim=0)
+#         std_tol = torch.mean(torch.exp(mean_var[:,1]), dim=0)
+#         distr = torch.distributions.log_normal.LogNormal(mean_tol, std_tol)
+#         tol_val = distr.sample()
+        
+        if self.gate == 'cnn2':
+            mean_tol, std_tol = self.gate_net(z)
+            mean_tol = torch.mean(mean_tol, dim=0)
+            std_tol = self.scale_std * torch.mean(std_tol, dim=0) + 1e-8
+        else:
+            mean_tol = torch.mean(self.gate_net(z), dim=0)
+            std_tol = self.scale_std * (5.0/3.0) * 1e-5
+
+        distr = torch.distributions.normal.Normal(mean_tol, std_tol)
+        # distr = torch.distributions.half_normal.HalfNormal(scale=std_tol)
+        tol_val = distr.sample()
+        # tol_res = distr.sample()
+        # tol_val = mean_tol + tol_res
+        tol_val = self.scale * tol_val
+        
+        # collect actions and policies
+        # self.saved_logp.append(distr.log_prob(tol_val))
+        
+        
+        logp_actions = distr.log_prob(tol_val)
+        
+        atol_val = tol_val
+        rtol_val = tol_val
+        test_atol_val = tol_val
+        test_rtol_val = tol_val
 
         # Refresh the odefunc statistics.
         self.odefunc.before_odeint()
@@ -95,11 +122,15 @@ class CNF_Gate(nn.Module):
         
         z_t, logpz_t = state_t[:2]
         self.regularization_states = state_t[2:]
+        
+        # collect the rewards as the number of function evaluations
+        nfe = self.num_evals_rl()
+        nfe = torch.tensor(nfe).to(z)
 
         if logpz is not None:
-            return z_t, logpz_t, atol_val, rtol_val
+            return z_t, logpz_t, atol_val, rtol_val, logp_actions, nfe
         else:
-            return z_t, atol_val, rtol_val
+            return z_t, atol_val, rtol_val, logp_actions, nfe
 
     def get_regularization_states(self):
         reg_states = self.regularization_states
@@ -108,6 +139,9 @@ class CNF_Gate(nn.Module):
 
     def num_evals(self):
         return self.odefunc._num_evals.item()
+    
+    def num_evals_rl(self):
+        return self.odefunc._num_evals_rl.item()
 
 
 def _flip(x, dim):
