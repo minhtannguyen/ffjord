@@ -33,8 +33,6 @@ from train_misc import create_regularization_fns, get_regularization, append_reg
 
 from tensorboardX import SummaryWriter
 
-import glob
-
 # go fast boi!!
 torch.backends.cudnn.benchmark = True
 SOLVERS = ["dopri5", "bdf", "rk4", "midpoint", 'adams', 'explicit_adams']
@@ -132,14 +130,12 @@ parser.add_argument(
 parser.add_argument("--begin_epoch", type=int, default=1)
 parser.add_argument("--resume", type=str, default=None)
 parser.add_argument("--save", type=str, default="experiments/cnf")
-parser.add_argument("--load_dir", type=str, default=None)
-parser.add_argument("--resume_load", type=int, default=1)
 parser.add_argument("--val_freq", type=int, default=1)
 parser.add_argument("--log_freq", type=int, default=1)
 
 args = parser.parse_args()
 
-import lib.odenvp_conditional_rl as odenvp
+import lib.odenvp_conditional_rl_multiscale as odenvp
     
 # set seed
 torch.manual_seed(args.seed)
@@ -473,15 +469,16 @@ def compute_bits_per_dim_conditional(x, y, model):
     # if x.shape[0] < 200:
     #     model = model.module
     
-    z, delta_logp, atol, rtol, logp_actions, nfe = model(x, zero)  # run model forward
+    z_sup, z_unsup, delta_logp, atol, rtol, logp_actions, nfe = model(x, zero)  # run model forward
     
-    dim_sup = int(args.condition_ratio * np.prod(z.size()[1:]))
+    z_sup = torch.cat(z_sup, 1)
+    z_unsup = torch.cat(z_unsup, 1)
     
     # prior
     mean, logs = model.module._prior(y_onehot)
 
-    logpz_sup = modules.GaussianDiag.logp(mean, logs, z[:, 0:dim_sup]).view(-1,1)  # logp(z)_sup
-    logpz_unsup = standard_normal_logprob(z[:, dim_sup:]).view(z.shape[0], -1).sum(1, keepdim=True)
+    logpz_sup = modules.GaussianDiag.logp(mean, logs, z_sup).view(-1,1)  # logp(z)_sup
+    logpz_unsup = standard_normal_logprob(z_unsup).view(z_unsup.shape[0], -1).sum(1, keepdim=True)
     logpz = logpz_sup + logpz_unsup
     logpx = logpz - delta_logp
 
@@ -490,49 +487,14 @@ def compute_bits_per_dim_conditional(x, y, model):
     
     # dropout
     if args.dropout_rate > 0:
-        zsup = model.module.dropout(z[:, 0:dim_sup])
-    else:
-        zsup = z[:, 0:dim_sup]
+        z_sup = model.module.dropout(z_sup)
     
     # compute xentropy loss
-    y_logits = model.module.project_class(zsup)
+    y_logits = model.module.project_class(z_sup)
     loss_xent = model.module.loss_class(y_logits, y.to(x.get_device()))
     y_predicted = np.argmax(y_logits.cpu().detach().numpy(), axis=1)
 
     return bits_per_dim, loss_xent, y_predicted, atol, rtol, logp_actions, nfe
-
-def compute_marginal_bits_per_dim(x, y, model):
-    zero = torch.zeros(x.shape[0], 1).to(x)
-
-    # Don't use data parallelize if batch size is small.
-    # if x.shape[0] < 200:
-    #     model = model.module
-    
-    z, delta_logp, atol, rtol, logp_actions, nfe = model(x, zero)  # run model forward
-    
-    dim_sup = int(args.condition_ratio * np.prod(z.size()[1:]))
-    
-    logpz_sup = []
-    
-    for indx in range(model.module.y_class):
-        y_i = torch.full_like(y, indx).to(y)
-        y_onehot = thops.onehot(y_i, num_classes=model.module.y_class).to(x)
-        # prior
-        mean, logs = model.module._prior(y_onehot)
-        logpz_sup.append(modules.GaussianDiag.logp(mean, logs, z[:, 0:dim_sup]).view(-1,1) - torch.log(torch.tensor(model.module.y_class).to(z)))  # logp(z)_sup
-        
-    logpz_sup = torch.cat(logpz_sup,dim=1)
-    logpz_sup = torch.logsumexp(logpz_sup, 1, keepdim=True)
-    
-    logpz_unsup = standard_normal_logprob(z[:, dim_sup:]).view(z.shape[0], -1).sum(1, keepdim=True)
-    logpz = logpz_sup + logpz_unsup
-    
-    logpx = logpz - delta_logp
-
-    logpx_per_dim = torch.sum(logpx) / x.nelement()  # averaged over batches
-    bits_per_dim = -(logpx_per_dim - np.log(256)) / np.log(2)
-
-    return bits_per_dim
 
 def create_model(args, data_shape, regularization_fns):
     hidden_dims = tuple(map(int, args.dims.split(",")))
@@ -653,47 +615,7 @@ if __name__ == "__main__":
     steps_meter = utils.RunningAverageMeter(0.97)
     grad_meter = utils.RunningAverageMeter(0.97)
     tt_meter = utils.RunningAverageMeter(0.97)
-    
-    
-    if args.load_dir is not None:
-        filelist = glob.glob(os.path.join(args.load_dir,"*epoch_*_checkpt.pth"))
-        all_indx = []
-        for infile in sorted(filelist):
-            all_indx.append(int(infile.split('_')[-2]))
-            
-        indxmax = max(all_indx)
-        indxstart = max(1, args.resume_load)
-        
-        for i in range(indxstart,indxmax+1):
-            model = create_model(args, data_shape, regularization_fns)
-            infile = os.path.join(args.load_dir,"epoch_%i_checkpt.pth"%i)
-            print(infile)
-            checkpt = torch.load(infile, map_location=lambda storage, loc: storage)
-            model.load_state_dict(checkpt["state_dict"])
-            
-            if torch.cuda.is_available():
-                model = torch.nn.DataParallel(model).cuda()
-                
-            model.eval()
-            
-            with torch.no_grad():
-                logger.info("validating...")
-                losses = []
-                for (x, y) in test_loader:
-                    if args.data == "colormnist":
-                        y = y[0]
-                        
-                    if not args.conv:
-                        x = x.view(x.shape[0], -1)
-                    x = cvt(x)
-                    nll = compute_marginal_bits_per_dim(x, y, model)
-                    losses.append(nll.cpu().numpy())
-                    
-                loss = np.mean(losses)
-                writer.add_scalars('nll_marginal', {'validation': loss}, i)
-        
-        raise SystemExit(0)
-    
+
     # restore parameters
     if args.resume is not None:
         checkpt = torch.load(args.resume, map_location=lambda storage, loc: storage)
@@ -722,14 +644,38 @@ if __name__ == "__main__":
 
     # For visualization.
     if args.conditional:
-        dim_unsup = int((1.0 - args.condition_ratio) * np.prod(data_shape))
         fixed_y = torch.from_numpy(np.arange(model.module.y_class)).repeat(model.module.y_class).type(torch.long).to(device, non_blocking=True)
         fixed_y_onehot = thops.onehot(fixed_y, num_classes=model.module.y_class)
         with torch.no_grad():
             mean, logs = model.module._prior(fixed_y_onehot)
             fixed_z_sup = modules.GaussianDiag.sample(mean, logs)
+            dim_unsup = np.prod(data_shape) - np.prod(fixed_z_sup.shape[1:])
             fixed_z_unsup = cvt(torch.randn(model.module.y_class**2, dim_unsup))
-            fixed_z = torch.cat((fixed_z_sup, fixed_z_unsup),1)
+            
+            a_sup = fixed_z_sup.shape[1] // (2**(model.module.n_scale - 1))
+            a_unsup = fixed_z_unsup.shape[1] // (2**(model.module.n_scale - 1))
+            
+            fixed_z = []
+            start_sup = 0; start_unsup = 0
+            for ns in range(model.module.n_scale, 1, -1):
+                end_sup = start_sup + (2**(ns-2))*a_sup
+                end_unsup = start_unsup + (2**(ns-2))*a_unsup
+                
+                fixed_z.append(fixed_z_sup[:,start_sup:end_sup])
+                fixed_z.append(fixed_z_unsup[:,start_unsup:end_unsup])
+                
+                start_sup = end_sup; start_unsup = end_unsup
+            
+            end_sup = start_sup + a_sup
+            end_unsup = start_unsup + a_unsup
+            
+            fixed_z.append(fixed_z_sup[:,start_sup:end_sup])
+            fixed_z.append(fixed_z_unsup[:,start_unsup:end_unsup])
+            
+            # for i_z in range(len(fixed_z)): print(fixed_z[i_z].shape)
+            
+            fixed_z = torch.cat(fixed_z,1)
+            
     else:
         fixed_z = cvt(torch.randn(100, *data_shape))
     
@@ -855,19 +801,6 @@ if __name__ == "__main__":
                 writer.add_text('info', log_message, itr)
 
             itr += 1
-        
-        if args.data == "colormnist":
-            # print train images
-            xall = []
-            ximg = x[0:40].cpu().numpy().transpose((0,2,3,1))
-            for i in range(ximg.shape[0]):
-                xall.append(ximg[i])
-        
-            xall = np.hstack(xall)
-
-            plt.imshow(xall)
-            plt.axis('off')
-            plt.show()
             
         # compute test loss
         model.eval()
@@ -915,19 +848,6 @@ if __name__ == "__main__":
                         losses_xent.append(loss_xent.cpu().numpy())
                     else:
                         losses_xent.append(loss_xent)
-                
-                if args.data == "colormnist":
-                    # print test images
-                    xall = []
-                    ximg = x[0:40].cpu().numpy().transpose((0,2,3,1))
-                    for i in range(ximg.shape[0]):
-                        xall.append(ximg[i])
-
-                    xall = np.hstack(xall)
-
-                    plt.imshow(xall)
-                    plt.axis('off')
-                    plt.show()
                     
                 loss_nll = np.mean(losses_nll); loss_xent = np.mean(losses_xent); loss = np.mean(losses)
                 error_score =  1. - total_correct / len(test_loader.dataset)

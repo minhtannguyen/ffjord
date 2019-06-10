@@ -66,6 +66,21 @@ def count_nfe(model):
     model.apply(accumulator)
     return accumulator.num_evals
 
+def count_nfe_gate(model):
+
+    class AccNumEvals(object):
+
+        def __init__(self):
+            self.num_evals = 0
+
+        def __call__(self, module):
+            if isinstance(module, layers.CNF_Gate):
+                self.num_evals += module.num_evals()
+
+    accumulator = AccNumEvals()
+    model.apply(accumulator)
+    return accumulator.num_evals
+
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)

@@ -22,6 +22,8 @@ from train_misc import create_regularization_fns, get_regularization, append_reg
 
 from tensorboardX import SummaryWriter
 
+import glob
+
 # go fast boi!!
 torch.backends.cudnn.benchmark = True
 SOLVERS = ["dopri5", "bdf", "rk4", "midpoint", 'adams', 'explicit_adams']
@@ -99,6 +101,8 @@ parser.add_argument(
 parser.add_argument("--begin_epoch", type=int, default=1)
 parser.add_argument("--resume", type=str, default=None)
 parser.add_argument("--save", type=str, default="experiments/cnf")
+parser.add_argument("--load_dir", type=str, default=None)
+parser.add_argument("--resume_load", type=int, default=1)
 parser.add_argument("--val_freq", type=int, default=1)
 parser.add_argument("--log_freq", type=int, default=1)
 
@@ -301,6 +305,34 @@ def compute_bits_per_dim_conditional(x, y, model):
 
     return bits_per_dim, loss_xent, y_predicted
 
+def compute_marginal_bits_per_dim(x, y, model):
+    zero = torch.zeros(x.shape[0], 1).to(x)
+
+    # Don't use data parallelize if batch size is small.
+    # if x.shape[0] < 200:
+    #     model = model.module
+    
+    z, delta_logp = model(x, zero)  # run model forward
+    
+    logpz = []
+    
+    for indx in range(model.module.y_class):
+        y_i = torch.full_like(y, indx).to(y)
+        y_onehot = thops.onehot(y_i, num_classes=model.module.y_class).to(x)
+        # prior
+        mean, logs = model.module._prior(y_onehot)
+        logpz.append(modules.GaussianDiag.logp(mean, logs, z).view(-1,1) - torch.log(torch.tensor(model.module.y_class).to(z)))  # logp(z)_sup
+        
+    logpz = torch.cat(logpz,dim=1)
+    logpz = torch.logsumexp(logpz, 1, keepdim=True)
+    
+    logpx = logpz - delta_logp
+
+    logpx_per_dim = torch.sum(logpx) / x.nelement()  # averaged over batches
+    bits_per_dim = -(logpx_per_dim - np.log(256)) / np.log(2)
+
+    return bits_per_dim
+
 def create_model(args, data_shape, regularization_fns):
     hidden_dims = tuple(map(int, args.dims.split(",")))
     strides = tuple(map(int, args.strides.split(",")))
@@ -418,6 +450,45 @@ if __name__ == "__main__":
     steps_meter = utils.RunningAverageMeter(0.97)
     grad_meter = utils.RunningAverageMeter(0.97)
     tt_meter = utils.RunningAverageMeter(0.97)
+    
+    if args.load_dir is not None:
+        filelist = glob.glob(os.path.join(args.load_dir,"*epoch_*_checkpt.pth"))
+        all_indx = []
+        for infile in sorted(filelist):
+            all_indx.append(int(infile.split('_')[-2]))
+            
+        indxmax = max(all_indx)
+        indxstart = max(1, args.resume_load)
+        
+        for i in range(indxstart,indxmax+1):
+            model = create_model(args, data_shape, regularization_fns)
+            infile = os.path.join(args.load_dir,"epoch_%i_checkpt.pth"%i)
+            print(infile)
+            checkpt = torch.load(infile, map_location=lambda storage, loc: storage)
+            model.load_state_dict(checkpt["state_dict"])
+            
+            if torch.cuda.is_available():
+                model = torch.nn.DataParallel(model).cuda()
+                
+            model.eval()
+            
+            with torch.no_grad():
+                logger.info("validating...")
+                losses = []
+                for (x, y) in test_loader:
+                    if args.data == "colormnist":
+                        y = y[0]
+                        
+                    if not args.conv:
+                        x = x.view(x.shape[0], -1)
+                    x = cvt(x)
+                    nll = compute_marginal_bits_per_dim(x, y, model)
+                    losses.append(nll.cpu().numpy())
+                    
+                loss = np.mean(losses)
+                writer.add_scalars('nll_marginal', {'validation': loss}, i)
+    
+        raise SystemExit(0)
 
     # restore parameters
     if args.resume is not None:
