@@ -479,7 +479,8 @@ def compute_bits_per_dim_conditional(x, y, model):
     
     # prior
     mean, logs = model.module._prior(y_onehot)
-
+    
+    # compute the conditional nll
     logpz_sup = modules.GaussianDiag.logp(mean, logs, z[:, 0:dim_sup]).view(-1,1)  # logp(z)_sup
     logpz_unsup = standard_normal_logprob(z[:, dim_sup:]).view(z.shape[0], -1).sum(1, keepdim=True)
     logpz = logpz_sup + logpz_unsup
@@ -487,6 +488,26 @@ def compute_bits_per_dim_conditional(x, y, model):
 
     logpx_per_dim = torch.sum(logpx) / x.nelement()  # averaged over batches
     bits_per_dim = -(logpx_per_dim - np.log(256)) / np.log(2)
+    
+    # compute the marginal nll
+    logpz_sup_marginal = []
+    
+    for indx in range(model.module.y_class):
+        y_i = torch.full_like(y, indx).to(y)
+        y_onehot = thops.onehot(y_i, num_classes=model.module.y_class).to(x)
+        # prior
+        mean, logs = model.module._prior(y_onehot)
+        logpz_sup_marginal.append(modules.GaussianDiag.logp(mean, logs, z[:, 0:dim_sup]).view(-1,1) - torch.log(torch.tensor(model.module.y_class).to(z)))  # logp(z)_sup
+        
+    logpz_sup_marginal = torch.cat(logpz_sup_marginal,dim=1)
+    logpz_sup_marginal = torch.logsumexp(logpz_sup_marginal, 1, keepdim=True)
+    
+    logpz_marginal = logpz_sup_marginal + logpz_unsup
+    
+    logpx_marginal = logpz_marginal - delta_logp
+
+    logpx_per_dim_marginal = torch.sum(logpx_marginal) / x.nelement()  # averaged over batches
+    bits_per_dim_marginal = -(logpx_per_dim_marginal - np.log(256)) / np.log(2)
     
     # dropout
     if args.dropout_rate > 0:
@@ -499,7 +520,7 @@ def compute_bits_per_dim_conditional(x, y, model):
     loss_xent = model.module.loss_class(y_logits, y.to(x.get_device()))
     y_predicted = np.argmax(y_logits.cpu().detach().numpy(), axis=1)
 
-    return bits_per_dim, loss_xent, y_predicted, atol, rtol, logp_actions, nfe
+    return bits_per_dim, loss_xent, y_predicted, atol, rtol, logp_actions, nfe, bits_per_dim_marginal
 
 def compute_marginal_bits_per_dim(x, y, model):
     zero = torch.zeros(x.shape[0], 1).to(x)
@@ -653,7 +674,7 @@ if __name__ == "__main__":
     steps_meter = utils.RunningAverageMeter(0.97)
     grad_meter = utils.RunningAverageMeter(0.97)
     tt_meter = utils.RunningAverageMeter(0.97)
-    
+    nll_marginal_meter = utils.RunningAverageMeter(0.97) # track negative marginal log-likelihood
     
     if args.load_dir is not None:
         filelist = glob.glob(os.path.join(args.load_dir,"*epoch_*_checkpt.pth"))
@@ -716,6 +737,7 @@ if __name__ == "__main__":
         steps_meter.set(checkpt['nfe_train'])
         grad_meter.set(checkpt['grad_train'])
         tt_meter.set(checkpt['total_time_train'])
+        nll_marginal_meter.set(checkpt['bits_per_dim_marginal_train'])
 
     if torch.cuda.is_available():
         model = torch.nn.DataParallel(model).cuda()
@@ -762,7 +784,7 @@ if __name__ == "__main__":
             
             # compute loss
             if args.conditional:
-                loss_nll, loss_xent, y_predicted, atol, rtol, logp_actions, nfe = compute_bits_per_dim_conditional(x, y, model)
+                loss_nll, loss_xent, y_predicted, atol, rtol, logp_actions, nfe, loss_nll_marginal = compute_bits_per_dim_conditional(x, y, model)
                 if args.train_mode == "semisup":
                     loss =  loss_nll + args.weight_y * loss_xent
                 elif args.train_mode == "sup":
@@ -822,6 +844,7 @@ if __name__ == "__main__":
             steps_meter.update(count_nfe_gate(model))
             grad_meter.update(grad_norm)
             tt_meter.update(total_time)
+            nll_marginal_meter.update(loss_nll_marginal.item())
             
             for idx in range(len(model.module.transforms)):
                 for layer in model.module.transforms[idx].chain:
@@ -837,6 +860,7 @@ if __name__ == "__main__":
             writer.add_scalars('nfe', {'train_iter': steps_meter.val}, itr)
             writer.add_scalars('grad', {'train_iter': grad_meter.val}, itr)
             writer.add_scalars('total_time', {'train_iter': tt_meter.val}, itr)
+            writer.add_scalars('bits_per_dim_marginal', {'train_iter': nll_marginal_meter.val}, itr)
 
             if itr % args.log_freq == 0:
                 for tol_indx in range(len(atol)):
@@ -856,19 +880,6 @@ if __name__ == "__main__":
 
             itr += 1
         
-        if args.data == "colormnist":
-            # print train images
-            xall = []
-            ximg = x[0:40].cpu().numpy().transpose((0,2,3,1))
-            for i in range(ximg.shape[0]):
-                xall.append(ximg[i])
-        
-            xall = np.hstack(xall)
-
-            plt.imshow(xall)
-            plt.axis('off')
-            plt.show()
-            
         # compute test loss
         model.eval()
         if epoch % args.val_freq == 0:
@@ -882,6 +893,7 @@ if __name__ == "__main__":
                 writer.add_scalars('nfe', {'train_epoch': steps_meter.avg}, epoch)
                 writer.add_scalars('grad', {'train_epoch': grad_meter.avg}, epoch)
                 writer.add_scalars('total_time', {'train_epoch': tt_meter.avg}, epoch)
+                writer.add_scalars('bits_per_dim_marginal', {'train_epoch': nll_marginal_meter.avg}, epoch)
                 
                 start = time.time()
                 logger.info("validating...")
@@ -897,7 +909,7 @@ if __name__ == "__main__":
                         x = x.view(x.shape[0], -1)
                     x = cvt(x)
                     if args.conditional:
-                        loss_nll, loss_xent, y_predicted, atol, rtol, logp_actions, nfe = compute_bits_per_dim_conditional(x, y, model)
+                        loss_nll, loss_xent, y_predicted, atol, rtol, logp_actions, nfe, loss_nll_marginal = compute_bits_per_dim_conditional(x, y, model)
                         if args.train_mode == "semisup":
                             loss =  loss_nll + args.weight_y * loss_xent
                         elif args.train_mode == "sup":
@@ -941,6 +953,7 @@ if __name__ == "__main__":
                 writer.add_scalars('xent', {'validation': loss_xent}, epoch)
                 writer.add_scalars('loss', {'validation': loss}, epoch)
                 writer.add_scalars('error', {'validation': error_score}, epoch)
+                writer.add_scalars('bits_per_dim_marginal', {'validation': loss_nll_marginal}, epoch)
                 
                 for tol_indx in range(len(atol)):
                     writer.add_scalars('atol_%i'%tol_indx, {'validation': atol[tol_indx].mean()}, epoch)
@@ -965,6 +978,7 @@ if __name__ == "__main__":
                         "loss": loss,
                         "xent": loss_xent,
                         "bits_per_dim": loss_nll,
+                        "bits_per_dim_marginal": loss_nll_marginal,
                         "best_bits_per_dim": best_loss_nll,
                         "best_error_score": best_error_score,
                         "epoch_time": time_epoch_meter.val,
@@ -974,6 +988,7 @@ if __name__ == "__main__":
                         "loss_train": loss_meter.avg,
                         "xent_train": xent_meter.avg,
                         "bits_per_dim_train": nll_meter.avg,
+                        "bits_per_dim_marginal_train": nll_marginal_meter.avg,
                         "total_time_train": tt_meter.avg,
                         "time_train": time_meter.avg,
                         "nfe_train": steps_meter.avg,
@@ -990,6 +1005,7 @@ if __name__ == "__main__":
                         "loss": loss,
                         "xent": loss_xent,
                         "bits_per_dim": loss_nll,
+                        "bits_per_dim_marginal": loss_nll_marginal,
                         "best_bits_per_dim": best_loss_nll,
                         "best_error_score": best_error_score,
                         "epoch_time": time_epoch_meter.val,
@@ -999,6 +1015,7 @@ if __name__ == "__main__":
                         "loss_train": loss_meter.avg,
                         "xent_train": xent_meter.avg,
                         "bits_per_dim_train": nll_meter.avg,
+                        "bits_per_dim_marginal_train": nll_marginal_meter.avg,
                         "total_time_train": tt_meter.avg,
                         "time_train": time_meter.avg,
                         "nfe_train": steps_meter.avg,
@@ -1018,6 +1035,7 @@ if __name__ == "__main__":
                         "loss": loss,
                         "xent": loss_xent,
                         "bits_per_dim": loss_nll,
+                        "bits_per_dim_marginal": loss_nll_marginal,
                         "best_bits_per_dim": best_loss_nll,
                         "best_error_score": best_error_score,
                         "epoch_time": time_epoch_meter.val,
@@ -1027,6 +1045,7 @@ if __name__ == "__main__":
                         "loss_train": loss_meter.avg,
                         "xent_train": xent_meter.avg,
                         "bits_per_dim_train": nll_meter.avg,
+                        "bits_per_dim_marginal_train": nll_marginal_meter.avg,
                         "total_time_train": tt_meter.avg,
                         "time_train": time_meter.avg,
                         "nfe_train": steps_meter.avg,
@@ -1047,6 +1066,7 @@ if __name__ == "__main__":
                             "loss": loss,
                             "xent": loss_xent,
                             "bits_per_dim": loss_nll,
+                            "bits_per_dim_marginal": loss_nll_marginal,
                             "best_bits_per_dim": best_loss_nll,
                             "best_error_score": best_error_score,
                             "epoch_time": time_epoch_meter.val,
@@ -1056,6 +1076,7 @@ if __name__ == "__main__":
                             "loss_train": loss_meter.avg,
                             "xent_train": xent_meter.avg,
                             "bits_per_dim_train": nll_meter.avg,
+                            "bits_per_dim_marginal_train": nll_marginal_meter.avg,
                             "total_time_train": tt_meter.avg,
                             "time_train": time_meter.avg,
                             "nfe_train": steps_meter.avg,

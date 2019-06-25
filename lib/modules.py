@@ -356,3 +356,26 @@ class SqueezeLayer(nn.Module):
         else:
             output = unsqueeze2d(input, self.factor)
             return output, logdet
+
+        
+class MultiLinearZeros(nn.Module):
+    def __init__(self, in_channels, mid_channels, out_channels, logscale_factor=3):
+        super().__init__()
+        self.logscale_factor = logscale_factor
+        # set logs parameter
+        self.register_parameter("logs", nn.Parameter(torch.zeros(out_channels)))
+        # set layers
+        self.fc1 = nn.Linear(in_channels, mid_channels)
+        self.relu1 = nn.LeakyReLU()
+        self.fc2 = nn.Linear(mid_channels, out_channels)
+        # init
+        self.fc1.weight.data.zero_()
+        self.fc1.bias.data.zero_()
+        self.fc2.weight.data.zero_()
+        self.fc2.bias.data.zero_()
+
+    def forward(self, input):
+        output = self.fc1(input)
+        output = self.relu1(output)
+        output = self.fc2(output)
+        return output * torch.exp(self.logs * self.logscale_factor)

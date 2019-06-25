@@ -80,7 +80,15 @@ class ODENVP(nn.Module):
             c, h, w = c * 2, h // 2, w // 2
         
         return nn.ModuleList(transforms)
-
+    
+    def set_scale_std(self, scale_std):
+        for idx in range(len(self.transforms)):
+            inds = range(len(self.transforms[idx].chain))
+            for i in inds:
+                if hasattr(self.transforms[idx].chain[i], 'atol'):
+                    self.transforms[idx].chain[i].set_scale_std(scale_std)
+                    print(self.transforms[idx].chain[i].scale_std)
+                    
     def get_regularization(self):
         if len(self.regularization_fns) == 0:
             return None

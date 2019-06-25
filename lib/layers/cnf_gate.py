@@ -73,18 +73,20 @@ class CNF_Gate(nn.Module):
             mean_tol = torch.mean(self.gate_net(z), dim=0)
             std_tol = self.scale_std * (5.0/3.0) * 1e-5
 
-        distr = torch.distributions.normal.Normal(mean_tol, std_tol)
-        # distr = torch.distributions.half_normal.HalfNormal(scale=std_tol)
-        tol_val = distr.sample()
-        # tol_res = distr.sample()
-        # tol_val = mean_tol + tol_res
+        distr = torch.distributions.half_normal.HalfNormal(scale=std_tol)
+        
+        tol_res = distr.sample()
+        
+        tol_res = tol_res.to(z)
+        mean_tol = mean_tol.to(z)
+        
+        tol_val = mean_tol + tol_res
         tol_val = self.scale * tol_val
         
         # collect actions and policies
         # self.saved_logp.append(distr.log_prob(tol_val))
         
-        
-        logp_actions = distr.log_prob(tol_val)
+        logp_actions = distr.log_prob(tol_res)
         
         atol_val = tol_val
         rtol_val = tol_val
@@ -142,6 +144,9 @@ class CNF_Gate(nn.Module):
     
     def num_evals_rl(self):
         return self.odefunc._num_evals_rl.item()
+    
+    def set_scale_std(self, scale_std):
+        self.scale_std = scale_std
 
 
 def _flip(x, dim):

@@ -63,7 +63,7 @@ def generate_spiral2d(nspiral=1000,
     # generate clock-wise and counter clock-wise spirals in observation space
     # with two sets of time-invariant latent dynamics
     zs_cw = stop + 1. - orig_ts
-    b = np.random.normal(loc=0.0, scale=1.0)
+    b = np.random.normal(loc=0.0, scale=1.0) # tan's modification
     rs_cw = a + b * 50. / zs_cw
     xs, ys = rs_cw * np.cos(zs_cw) - 5., rs_cw * np.sin(zs_cw)
     orig_traj_cw = np.stack((xs, ys), axis=1)
@@ -97,8 +97,6 @@ def generate_spiral2d(nspiral=1000,
         samp_traj = orig_traj[t0_idx:t0_idx + nsample, :].copy()
         samp_traj += npr.randn(*samp_traj.shape) * noise_std
         samp_trajs.append(samp_traj)
-        
-        import ipdb; ipdb.set_trace()
 
     # batching for sample trajectories is good for RNN; batching for original
     # trajectories only for ease of indexing
