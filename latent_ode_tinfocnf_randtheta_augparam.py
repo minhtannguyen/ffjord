@@ -17,6 +17,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--adjoint', type=eval, default=False)
 parser.add_argument('--visualize', type=eval, default=False)
 parser.add_argument('--niters', type=int, default=2000)
+parser.add_argument('--nspiral', type=int, default=5000)
+parser.add_argument('--nsample', type=int, default=100)
 parser.add_argument('--lr', type=float, default=0.01)
 parser.add_argument('--gpu', type=int, default=0)
 parser.add_argument('--train_dir', type=str, default=None)
@@ -26,12 +28,13 @@ parser.add_argument("--savedir", type=str, default="./results")
 parser.add_argument("--save", type=str, default="vis")
 parser.add_argument("--seed", type=int, default=0)
 
-parser.add_argument('--a', type=float, default=0.)
-parser.add_argument('--b', type=float, default=.3)
+parser.add_argument("--a_range", type=str, default="0., 1.")
+parser.add_argument("--b_range", type=str, default="0., 5.")
 parser.add_argument('--noise_std', type=float, default=.3)
-parser.add_argument('--a_test', type=float, default=0.)
-parser.add_argument('--b_test', type=float, default=.3)
+parser.add_argument("--a_range_test", type=str, default="0., 1.")
+parser.add_argument("--b_range_test", type=str, default="0., 5.")
 parser.add_argument('--noise_std_test', type=float, default=.3)
+parser.add_argument('--w_sup', type=float, default=1.0)
 
 args = parser.parse_args()
 
@@ -59,15 +62,15 @@ class LinearZeros(nn.Linear):
     def forward(self, input):
         output = super().forward(input)
         return output
-
-def generate_spiral2d(nspiral=1000,
+    
+def generate_spiral2d_randtheta(nspiral=1000,
                       ntotal=500,
                       nsample=100,
                       start=0.,
                       stop=1,  # approximately equal to 6pi
                       noise_std=.1,
-                      a=0.,
-                      b=1.,
+                      a_range=(0.,1.),
+                      b_range=(0.,5.),
                       savefig=True, suffix='train'):
     """Parametric formula for 2d spiral is `r = a + b * theta`.
 
@@ -87,46 +90,50 @@ def generate_spiral2d(nspiral=1000,
       third element is timestamps of size (ntotal,),
       and fourth element is timestamps of size (nsample,)
     """
-    a = a
-    b = b
-    # b = np.random.normal(loc=0.0, scale=1.0) # tan's modification
-    theta = np.array([a,b])
+    a = np.random.uniform(a_range[0], a_range[1], nspiral) # shape (nspiral, )
+    b = np.random.uniform(b_range[0], b_range[1], nspiral) # shape (nspiral, )
+    theta = np.concatenate((a[:,None],b[:,None]),1) # shape (nspiral, 2)
+    
+    ### I STOPPED HERE ####
     
     # add 1 all timestamps to avoid division by 0
-    orig_ts = np.linspace(start, stop, num=ntotal)
-    samp_ts = orig_ts[:nsample]
+    orig_ts = np.linspace(start, stop, num=ntotal) # [ntotal,]
+    samp_ts = orig_ts[:nsample] # [nsample,]
 
     # generate clock-wise and counter clock-wise spirals in observation space
     # with two sets of time-invariant latent dynamics
-    zs_cw = stop + 1. - orig_ts
-    rs_cw = a + b * 50. / zs_cw
-    xs, ys = rs_cw * np.cos(zs_cw) - 5., rs_cw * np.sin(zs_cw)
-    orig_traj_cw = np.stack((xs, ys), axis=1)
+    zs_cw = stop + 1. - orig_ts # [ntotal,]
+    zs_cw = np.repeat(zs_cw[:,None], nspiral, axis=1) # [ntotal, nspiral]
+    rs_cw = np.repeat(a[None,:], ntotal, axis=0) + np.matmul(50. / zs_cw, np.diag(b)) # [ntotal, nspiral]
+    xs, ys = rs_cw * np.cos(zs_cw) - 5., rs_cw * np.sin(zs_cw) # [ntotal, nspiral]
+    orig_traj_cw = np.stack((xs, ys), axis=1) # [ntotal, 2, nspiral]
 
-    zs_cc = orig_ts
-    rw_cc = a + b * zs_cc
-    xs, ys = rw_cc * np.cos(zs_cc) + 5., rw_cc * np.sin(zs_cc)
-    orig_traj_cc = np.stack((xs, ys), axis=1)
+    zs_cc = orig_ts # [ntotal,]
+    zs_cc = np.repeat(zs_cc[:,None], nspiral, axis=1) # [ntotal, nspiral]
+    rw_cc = np.repeat(a[None,:], ntotal, axis=0) + np.matmul(zs_cc, np.diag(b)) # [ntotal, nspiral]
+    xs, ys = rw_cc * np.cos(zs_cc) + 5., rw_cc * np.sin(zs_cc) # [ntotal, nspiral]
+    orig_traj_cc = np.stack((xs, ys), axis=1) # [ntotal, 2, nspiral]
 
     if savefig:
-        plt.figure()
-        plt.plot(orig_traj_cw[:, 0], orig_traj_cw[:, 1], label='clock')
-        plt.plot(orig_traj_cc[:, 0], orig_traj_cc[:, 1], label='counter clock')
-        plt.legend()
-        plt.savefig(savefile + '_ground_truth_%s.png'%suffix, dpi=500)
-        print('Saved ground truth spiral at {}'.format(savefile + '_ground_truth_%s.png'%suffix))
+        for i in range(3):
+            plt.figure()
+            plt.plot(orig_traj_cw[:, 0, i], orig_traj_cw[:, 1, i], label='clock')
+            plt.plot(orig_traj_cc[:, 0, i], orig_traj_cc[:, 1, i], label='counter clock')
+            plt.legend()
+            plt.savefig(savefile + '_ground_truth_%i_%s.png'%(i, suffix), dpi=500)
+            print('Saved ground truth spiral at {}'.format(savefile + '_ground_truth_%i_%s.png'%(i, suffix)))
 
     # sample starting timestamps
     orig_trajs = []
     samp_trajs = []
-    for _ in range(nspiral):
+    for i in range(nspiral):
         # don't sample t0 very near the start or the end
         t0_idx = npr.multinomial(
             1, [1. / (ntotal - 2. * nsample)] * (ntotal - int(2 * nsample)))
         t0_idx = np.argmax(t0_idx) + nsample
 
         cc = bool(npr.rand() > .5)  # uniformly select rotation
-        orig_traj = orig_traj_cc if cc else orig_traj_cw
+        orig_traj = orig_traj_cc[:,:,i] if cc else orig_traj_cw[:,:,i]
         orig_trajs.append(orig_traj)
 
         samp_traj = orig_traj[t0_idx:t0_idx + nsample, :].copy()
@@ -139,6 +146,7 @@ def generate_spiral2d(nspiral=1000,
     samp_trajs = np.stack(samp_trajs, axis=0)
 
     return orig_trajs, samp_trajs, orig_ts, samp_ts, theta
+
 
 class LatentODEfunc(nn.Module):
 
@@ -244,17 +252,17 @@ if __name__ == '__main__':
     nhidden = 20
     rnn_nhidden = 25
     obs_dim = 2
-    nspiral = 1000
+    nspiral = args.nspiral
     start = 0.
     stop = 6 * np.pi
     noise_std = args.noise_std
-    a = args.a
-    b = args.b
+    a_range = tuple(map(float, args.a_range.split(",")))
+    b_range = tuple(map(float, args.b_range.split(",")))
     noise_std_test = args.noise_std_test
-    a_test = args.a_test
-    b_test = args.b_test
-    ntotal = 1000
-    nsample = 100
+    a_range_test = tuple(map(float, args.a_range_test.split(",")))
+    b_range_test = tuple(map(float, args.b_range_test.split(",")))
+    ntotal = 500
+    nsample = args.nsample
     device = torch.device('cuda:' + str(args.gpu)
                           if torch.cuda.is_available() else 'cpu')
     
@@ -262,12 +270,12 @@ if __name__ == '__main__':
     num_evals = 100
 
     # generate train toy spiral data
-    orig_trajs, samp_trajs, orig_ts, samp_ts, theta = generate_spiral2d(
+    orig_trajs, samp_trajs, orig_ts, samp_ts, theta = generate_spiral2d_randtheta(
         nspiral=nspiral,
         start=start,
         stop=stop,
         noise_std=noise_std,
-        a=a, b=b, suffix='train'
+        a_range=a_range, b_range=b_range, suffix='train'
     )
     orig_trajs = torch.from_numpy(orig_trajs).float().to(device)
     samp_trajs = torch.from_numpy(samp_trajs).float().to(device)
@@ -275,12 +283,12 @@ if __name__ == '__main__':
     theta = torch.tensor(theta).to(device)
     
     # generate test toy spiral data
-    orig_trajs_test, samp_trajs_test, orig_ts_test, samp_ts_test, theta_test = generate_spiral2d(
+    orig_trajs_test, samp_trajs_test, orig_ts_test, samp_ts_test, theta_test = generate_spiral2d_randtheta(
         nspiral=nspiral,
         start=start,
         stop=stop,
         noise_std=noise_std_test,
-        a=a_test, b=b_test, suffix='test'
+        a_range=a_range_test, b_range=b_range_test, suffix='test'
     )
     orig_trajs_test = torch.from_numpy(orig_trajs_test).float().to(device)
     samp_trajs_test = torch.from_numpy(samp_trajs_test).float().to(device)
@@ -288,13 +296,15 @@ if __name__ == '__main__':
     theta_test = torch.tensor(theta_test).to(device)
 
     # model
-    func = LatentODEfunc(latent_dim, nhidden).to(device)
+    latent_dim_eff = (latent_dim + n_sys_params) if (args.sup and args.cond) else latent_dim
     rec = RecognitionRNN(latent_dim, obs_dim, rnn_nhidden, nspiral).to(device)
-    dec = Decoder(latent_dim, obs_dim, nhidden).to(device)
+    func = LatentODEfunc(latent_dim_eff, nhidden).to(device)
+    dec = Decoder(latent_dim_eff, obs_dim, nhidden).to(device)
+        
     params = (list(func.parameters()) + list(dec.parameters()) + list(rec.parameters()))
     
     if args.sup: 
-        regressor = LinearZeros(latent_dim, n_sys_params).to(device)
+        regressor = LinearZeros(latent_dim * 2, n_sys_params).to(device)
         params = params + list(regressor.parameters())
         
     if args.cond:
@@ -307,7 +317,6 @@ if __name__ == '__main__':
     loss_meter = RunningAverageMeter()
     loss_elbo_meter = RunningAverageMeter()
     if args.sup: loss_sysid_meter = RunningAverageMeter()
-    
         
     # loss
     l2loss = nn.MSELoss()
@@ -338,11 +347,12 @@ if __name__ == '__main__':
                 out, h = rec.forward(obs, h)
             qz0_mean, qz0_logvar = out[:, :latent_dim], out[:, latent_dim:]
             if args.sup:
-                pred_theta = regressor(qz0_mean)
+                pred_theta = regressor(out)
                 loss_sysid = l2loss(pred_theta, theta.to(pred_theta))
                 
             epsilon = torch.randn(qz0_mean.size()).to(device)
             z0 = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
+            if args.sup and args.cond: z0 = torch.cat((z0, pred_theta), dim=1)
 
             # forward in time and solve ode for reconstructions
             pred_z = odeint(func, z0, samp_ts).permute(1, 0, 2)
@@ -355,7 +365,7 @@ if __name__ == '__main__':
                 samp_trajs, pred_x, noise_logvar).sum(-1).sum(-1)
             
             if args.cond:
-                pz0 = conditioner(theta.to(pred_theta).view(1,n_sys_params)).repeat(z0.shape[0],1)
+                pz0 = conditioner(theta.to(pred_theta))
                 pz0_mean, pz0_logvar = split_feature(pz0, type="split")
             else:
                 pz0_mean = pz0_logvar = torch.zeros(z0.size()).to(device)
@@ -366,7 +376,7 @@ if __name__ == '__main__':
             loss_elbo = torch.mean(-logpx + analytic_kl, dim=0)
             
             if args.sup: 
-                loss = loss_elbo + loss_sysid
+                loss = loss_elbo + args.w_sup * loss_sysid
             else:
                 loss = loss_elbo
                 
@@ -377,7 +387,7 @@ if __name__ == '__main__':
             if args.sup:loss_sysid_meter.update(loss_sysid.item())
                 
             if args.sup: 
-                print('Iter: {}, running avg loss: {:.4f}, running avg elbo: {:.4f}, running avg sysid: {:.4f}, sysid: {:.4f}, {:.4f}, sysid_truth: {:.4f}, {:.4f}'.format(itr, loss_meter.avg, -loss_elbo_meter.avg, loss_sysid_meter.avg, pred_theta[:,0].mean().cpu().detach().numpy(), pred_theta[:,1].mean().cpu().detach().numpy(), theta[0].cpu().numpy(), theta[1].cpu().numpy()))
+                print('Iter: {}, running avg loss: {:.4f}, running avg elbo: {:.4f}, running avg sysid: {:.4f}, sysid: ({:.4f}, {:.4f}) ({:.4f}, {:.4f}) ({:.4f}, {:.4f}), sysid_truth: ({:.4f}, {:.4f}) ({:.4f}, {:.4f}) ({:.4f}, {:.4f})'.format(itr, loss_meter.avg, -loss_elbo_meter.avg, loss_sysid_meter.avg, pred_theta[0,0].cpu().detach().numpy(), pred_theta[0,1].cpu().detach().numpy(), pred_theta[10,0].cpu().detach().numpy(), pred_theta[10,1].cpu().detach().numpy(), pred_theta[20,0].cpu().detach().numpy(), pred_theta[20,1].cpu().detach().numpy(), theta[0,0].cpu().numpy(), theta[0,1].cpu().numpy(), theta[10,0].cpu().numpy(), theta[10,1].cpu().numpy(), theta[20,0].cpu().numpy(), theta[20,1].cpu().numpy()))
             else:
                 print('Iter: {}, running avg elbo: {:.4f}'.format(itr, -loss_meter.avg))
 
@@ -395,6 +405,45 @@ if __name__ == '__main__':
                 'samp_ts': samp_ts,
             }, ckpt_path)
             print('Stored ckpt at {}'.format(ckpt_path))
+            
+    ckpt_path = os.path.join(args.savedir, 'ckpt.pth')
+    if args.sup and args.cond:
+        torch.save({
+            'func_state_dict': func.state_dict(),
+            'rec_state_dict': rec.state_dict(),
+            'dec_state_dict': dec.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'regressor_state_dict': regressor.state_dict(),
+            'conditioner_state_dict': conditioner.state_dict(),
+            'orig_trajs': orig_trajs,
+            'samp_trajs': samp_trajs,
+            'orig_ts': orig_ts,
+            'samp_ts': samp_ts,
+        }, ckpt_path)
+    elif args.sup:
+        torch.save({
+            'func_state_dict': func.state_dict(),
+            'rec_state_dict': rec.state_dict(),
+            'dec_state_dict': dec.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'regressor_state_dict': regressor.state_dict(),
+            'orig_trajs': orig_trajs,
+            'samp_trajs': samp_trajs,
+            'orig_ts': orig_ts,
+            'samp_ts': samp_ts,
+        }, ckpt_path)
+    else:
+        torch.save({
+            'func_state_dict': func.state_dict(),
+            'rec_state_dict': rec.state_dict(),
+            'dec_state_dict': dec.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'orig_trajs': orig_trajs,
+            'samp_trajs': samp_trajs,
+            'orig_ts': orig_ts,
+            'samp_ts': samp_ts,
+        }, ckpt_path)
+    print('Stored ckpt at {}'.format(ckpt_path))
     print('Training complete after {} iters.'.format(itr))
     
     
@@ -407,13 +456,14 @@ if __name__ == '__main__':
                 out, h = rec.forward(obs, h)
             qz0_mean, qz0_logvar = out[:, :latent_dim], out[:, latent_dim:]
             if args.sup:
-                pred_theta = regressor(qz0_mean)
+                pred_theta = regressor(out)
                 loss_sysid = l2loss(pred_theta, theta.to(pred_theta))
                 print('%s:'%suffix)
-                print('loss sysid: {:.4f}, sysid: {:.4f}, {:.4f}, sysid_truth: {:.4f}, {:.4f}'.format(loss_sysid, pred_theta[:,0].mean().cpu().detach().numpy(), pred_theta[:,1].mean().cpu().detach().numpy(), theta[0].cpu().numpy(), theta[1].cpu().numpy()))
+                print('loss sysid: {:.4f}, sysid: ({:.4f}, {:.4f}) ({:.4f}, {:.4f}) ({:.4f}, {:.4f}), sysid_truth: ({:.4f}, {:.4f}) ({:.4f}, {:.4f}) ({:.4f}, {:.4f})'.format(loss_sysid, pred_theta[0,0].cpu().detach().numpy(), pred_theta[0,1].cpu().detach().numpy(), pred_theta[10,0].cpu().detach().numpy(), pred_theta[10,1].cpu().detach().numpy(), pred_theta[20,0].cpu().detach().numpy(), pred_theta[20,1].cpu().detach().numpy(), theta[0,0].cpu().numpy(), theta[0,1].cpu().numpy(), theta[10,0].cpu().numpy(), theta[10,1].cpu().numpy(), theta[20,0].cpu().numpy(), theta[20,1].cpu().numpy()))
                 
             epsilon = torch.randn(qz0_mean.size()).to(device)
             z0 = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
+            if args.sup and args.cond: z0 = torch.cat((z0, pred_theta), dim=1)
             orig_ts = torch.from_numpy(orig_ts).float().to(device)
 
             # take first trajectory for visualization

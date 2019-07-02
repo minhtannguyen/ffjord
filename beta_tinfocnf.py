@@ -17,21 +17,27 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--adjoint', type=eval, default=False)
 parser.add_argument('--visualize', type=eval, default=False)
 parser.add_argument('--niters', type=int, default=2000)
+parser.add_argument('--nspiral', type=int, default=5000)
+parser.add_argument('--nsample', type=int, default=100)
 parser.add_argument('--lr', type=float, default=0.01)
 parser.add_argument('--gpu', type=int, default=0)
 parser.add_argument('--train_dir', type=str, default=None)
 parser.add_argument('--sup', type=eval, default=False)
+parser.add_argument('--softcond', type=eval, default=False)
 parser.add_argument('--cond', type=eval, default=False)
 parser.add_argument("--savedir", type=str, default="./results")
 parser.add_argument("--save", type=str, default="vis")
 parser.add_argument("--seed", type=int, default=0)
 
-parser.add_argument('--a', type=float, default=0.)
-parser.add_argument('--b', type=float, default=.3)
+parser.add_argument("--a_range", type=str, default="0., 1.")
+parser.add_argument("--b_range", type=str, default="0., 5.")
 parser.add_argument('--noise_std', type=float, default=.3)
-parser.add_argument('--a_test', type=float, default=0.)
-parser.add_argument('--b_test', type=float, default=.3)
+parser.add_argument("--a_range_test", type=str, default="0., 1.")
+parser.add_argument("--b_range_test", type=str, default="0., 5.")
 parser.add_argument('--noise_std_test', type=float, default=.3)
+parser.add_argument('--w_sup', type=float, default=1.0)
+parser.add_argument('--beta', type=float, default=1.0)
+parser.add_argument("--latent_dim", type=int, default=5)
 
 args = parser.parse_args()
 
@@ -59,15 +65,15 @@ class LinearZeros(nn.Linear):
     def forward(self, input):
         output = super().forward(input)
         return output
-
-def generate_spiral2d(nspiral=1000,
+    
+def generate_spiral2d_randtheta(nspiral=1000,
                       ntotal=500,
                       nsample=100,
                       start=0.,
                       stop=1,  # approximately equal to 6pi
                       noise_std=.1,
-                      a=0.,
-                      b=1.,
+                      a_range=(0.,1.),
+                      b_range=(0.,5.),
                       savefig=True, suffix='train'):
     """Parametric formula for 2d spiral is `r = a + b * theta`.
 
@@ -87,46 +93,52 @@ def generate_spiral2d(nspiral=1000,
       third element is timestamps of size (ntotal,),
       and fourth element is timestamps of size (nsample,)
     """
-    a = a
-    b = b
-    # b = np.random.normal(loc=0.0, scale=1.0) # tan's modification
-    theta = np.array([a,b])
+    a = np.random.normal(loc=a_range[0], scale=a_range[1], size=nspiral) # shape (nspiral, )
+    b = np.random.normal(loc=b_range[0], scale=b_range[1], size=nspiral) # shape (nspiral, )
+    theta = np.concatenate((a[:,None],b[:,None]),1) # shape (nspiral, 2)
+    
+    ### I STOPPED HERE ####
     
     # add 1 all timestamps to avoid division by 0
-    orig_ts = np.linspace(start, stop, num=ntotal)
-    samp_ts = orig_ts[:nsample]
+    orig_ts = np.linspace(start, stop, num=ntotal) # [ntotal,]
+    samp_ts = orig_ts[:nsample] # [nsample,]
 
     # generate clock-wise and counter clock-wise spirals in observation space
     # with two sets of time-invariant latent dynamics
-    zs_cw = stop + 1. - orig_ts
-    rs_cw = a + b * 50. / zs_cw
-    xs, ys = rs_cw * np.cos(zs_cw) - 5., rs_cw * np.sin(zs_cw)
-    orig_traj_cw = np.stack((xs, ys), axis=1)
+    zs_cw = stop + 1. - orig_ts # [ntotal,]
+    zs_cw = np.repeat(zs_cw[:,None], nspiral, axis=1) # [ntotal, nspiral]
+    rs_cw = np.repeat(a[None,:], ntotal, axis=0) + np.matmul(50. / zs_cw, np.diag(b)) # [ntotal, nspiral]
+    xs, ys = rs_cw * np.cos(zs_cw) - 5., rs_cw * np.sin(zs_cw) # [ntotal, nspiral]
+    orig_traj_cw = np.stack((xs, ys), axis=1) # [ntotal, 2, nspiral]
 
-    zs_cc = orig_ts
-    rw_cc = a + b * zs_cc
-    xs, ys = rw_cc * np.cos(zs_cc) + 5., rw_cc * np.sin(zs_cc)
-    orig_traj_cc = np.stack((xs, ys), axis=1)
+    zs_cc = orig_ts # [ntotal,]
+    zs_cc = np.repeat(zs_cc[:,None], nspiral, axis=1) # [ntotal, nspiral]
+    rw_cc = np.repeat(a[None,:], ntotal, axis=0) + np.matmul(zs_cc, np.diag(b)) # [ntotal, nspiral]
+    xs, ys = rw_cc * np.cos(zs_cc) + 5., rw_cc * np.sin(zs_cc) # [ntotal, nspiral]
+    orig_traj_cc = np.stack((xs, ys), axis=1) # [ntotal, 2, nspiral]
 
     if savefig:
-        plt.figure()
-        plt.plot(orig_traj_cw[:, 0], orig_traj_cw[:, 1], label='clock')
-        plt.plot(orig_traj_cc[:, 0], orig_traj_cc[:, 1], label='counter clock')
-        plt.legend()
-        plt.savefig(savefile + '_ground_truth_%s.png'%suffix, dpi=500)
-        print('Saved ground truth spiral at {}'.format(savefile + '_ground_truth_%s.png'%suffix))
+        for i in range(3):
+            plt.figure()
+            plt.plot(orig_traj_cw[:, 0, i], orig_traj_cw[:, 1, i], label='clock')
+            plt.plot(orig_traj_cc[:, 0, i], orig_traj_cc[:, 1, i], label='counter clock')
+            plt.legend()
+            plt.savefig(savefile + '_ground_truth_%i_%s.png'%(i, suffix), dpi=500)
+            print('Saved ground truth spiral at {}'.format(savefile + '_ground_truth_%i_%s.png'%(i, suffix)))
 
     # sample starting timestamps
     orig_trajs = []
     samp_trajs = []
-    for _ in range(nspiral):
+    dir_vec = []
+    for i in range(nspiral):
         # don't sample t0 very near the start or the end
         t0_idx = npr.multinomial(
             1, [1. / (ntotal - 2. * nsample)] * (ntotal - int(2 * nsample)))
         t0_idx = np.argmax(t0_idx) + nsample
 
         cc = bool(npr.rand() > .5)  # uniformly select rotation
-        orig_traj = orig_traj_cc if cc else orig_traj_cw
+        dir_vec.append(float(cc))
+        orig_traj = orig_traj_cc[:,:,i] if cc else orig_traj_cw[:,:,i]
         orig_trajs.append(orig_traj)
 
         samp_traj = orig_traj[t0_idx:t0_idx + nsample, :].copy()
@@ -137,8 +149,13 @@ def generate_spiral2d(nspiral=1000,
     # trajectories only for ease of indexing
     orig_trajs = np.stack(orig_trajs, axis=0)
     samp_trajs = np.stack(samp_trajs, axis=0)
+    
+    dir_vec = np.array(dir_vec)
+    
+    theta = np.concatenate((a[:,None],b[:,None], dir_vec[:,None]),1) # shape (nspiral, 3)
 
     return orig_trajs, samp_trajs, orig_ts, samp_ts, theta
+
 
 class LatentODEfunc(nn.Module):
 
@@ -162,12 +179,12 @@ class LatentODEfunc(nn.Module):
 
 class RecognitionRNN(nn.Module):
 
-    def __init__(self, latent_dim=4, obs_dim=2, nhidden=25, nbatch=1):
+    def __init__(self, output_dim=4, obs_dim=2, nhidden=25, nbatch=1):
         super(RecognitionRNN, self).__init__()
         self.nhidden = nhidden
         self.nbatch = nbatch
         self.i2h = nn.Linear(obs_dim + nhidden, nhidden)
-        self.h2o = nn.Linear(nhidden, latent_dim * 2)
+        self.h2o = nn.Linear(nhidden, output_dim)
 
     def forward(self, x, h):
         combined = torch.cat((x, h), dim=1)
@@ -211,7 +228,7 @@ class RunningAverageMeter(object):
         else:
             self.avg = self.avg * self.momentum + val * (1 - self.momentum)
         self.val = val
-
+        
 
 def log_normal_pdf(x, mean, logvar):
     const = torch.from_numpy(np.array([2. * np.pi])).float().to(x.device)
@@ -240,34 +257,37 @@ def split_feature(tensor, type="split"):
 
 
 if __name__ == '__main__':
-    latent_dim = 4
+    latent_dim = args.latent_dim
     nhidden = 20
     rnn_nhidden = 25
+    output_dim = (latent_dim - 1) * 2 + 1 if (args.softcond or args.sup or args.cond) else latent_dim * 2  # 9
     obs_dim = 2
-    nspiral = 1000
+    nspiral = args.nspiral
     start = 0.
     stop = 6 * np.pi
     noise_std = args.noise_std
-    a = args.a
-    b = args.b
+    a_range = tuple(map(float, args.a_range.split(",")))
+    b_range = tuple(map(float, args.b_range.split(",")))
     noise_std_test = args.noise_std_test
-    a_test = args.a_test
-    b_test = args.b_test
-    ntotal = 1000
-    nsample = 100
+    a_range_test = tuple(map(float, args.a_range_test.split(",")))
+    b_range_test = tuple(map(float, args.b_range_test.split(",")))
+    pi_dir = 0.5
+    ntotal = 500
+    nsample = args.nsample
     device = torch.device('cuda:' + str(args.gpu)
                           if torch.cuda.is_available() else 'cpu')
     
-    n_sys_params = 2
+    n_sys_params = 3
+    cond_size = 5
     num_evals = 100
 
     # generate train toy spiral data
-    orig_trajs, samp_trajs, orig_ts, samp_ts, theta = generate_spiral2d(
+    orig_trajs, samp_trajs, orig_ts, samp_ts, theta = generate_spiral2d_randtheta(
         nspiral=nspiral,
         start=start,
         stop=stop,
         noise_std=noise_std,
-        a=a, b=b, suffix='train'
+        a_range=a_range, b_range=b_range, suffix='train'
     )
     orig_trajs = torch.from_numpy(orig_trajs).float().to(device)
     samp_trajs = torch.from_numpy(samp_trajs).float().to(device)
@@ -275,12 +295,12 @@ if __name__ == '__main__':
     theta = torch.tensor(theta).to(device)
     
     # generate test toy spiral data
-    orig_trajs_test, samp_trajs_test, orig_ts_test, samp_ts_test, theta_test = generate_spiral2d(
+    orig_trajs_test, samp_trajs_test, orig_ts_test, samp_ts_test, theta_test = generate_spiral2d_randtheta(
         nspiral=nspiral,
         start=start,
         stop=stop,
         noise_std=noise_std_test,
-        a=a_test, b=b_test, suffix='test'
+        a_range=a_range_test, b_range=b_range_test, suffix='test'
     )
     orig_trajs_test = torch.from_numpy(orig_trajs_test).float().to(device)
     samp_trajs_test = torch.from_numpy(samp_trajs_test).float().to(device)
@@ -289,28 +309,31 @@ if __name__ == '__main__':
 
     # model
     func = LatentODEfunc(latent_dim, nhidden).to(device)
-    rec = RecognitionRNN(latent_dim, obs_dim, rnn_nhidden, nspiral).to(device)
+    rec = RecognitionRNN(output_dim , obs_dim, rnn_nhidden, nspiral).to(device)
     dec = Decoder(latent_dim, obs_dim, nhidden).to(device)
     params = (list(func.parameters()) + list(dec.parameters()) + list(rec.parameters()))
-    
-    if args.sup: 
-        regressor = LinearZeros(latent_dim, n_sys_params).to(device)
-        params = params + list(regressor.parameters())
         
     if args.cond:
-        conditioner = LinearZeros(n_sys_params, latent_dim * 2).to(device)
+        conditioner = LinearZeros(n_sys_params, cond_size).to(device)
         params = params + list(conditioner.parameters())
+        
+    if args.softcond:
+        soft_conditioner = LinearZeros(cond_size, cond_size).to(device) # map [:,5] to [:,5]
+        params = params + list(soft_conditioner.parameters())
     
     optimizer = optim.Adam(params, lr=args.lr)
     
     # loss meters
     loss_meter = RunningAverageMeter()
     loss_elbo_meter = RunningAverageMeter()
-    if args.sup: loss_sysid_meter = RunningAverageMeter()
-    
+    if args.sup: 
+        loss_sysid_meter = RunningAverageMeter()
+        dir_meter = RunningAverageMeter()
+        params_meter = RunningAverageMeter()
         
     # loss
     l2loss = nn.MSELoss()
+    BCEloss = torch.nn.BCEWithLogitsLoss(reduction='none')
 
     if args.train_dir is not None:
         if not os.path.exists(args.train_dir):
@@ -336,13 +359,36 @@ if __name__ == '__main__':
             for t in reversed(range(samp_trajs.size(1))):
                 obs = samp_trajs[:, t, :]
                 out, h = rec.forward(obs, h)
-            qz0_mean, qz0_logvar = out[:, :latent_dim], out[:, latent_dim:]
-            if args.sup:
-                pred_theta = regressor(qz0_mean)
-                loss_sysid = l2loss(pred_theta, theta.to(pred_theta))
                 
-            epsilon = torch.randn(qz0_mean.size()).to(device)
-            z0 = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
+            if args.softcond or args.sup or args.cond:
+                qz0_mean, qz0_logvar = out[:, :(latent_dim-3)], out[:, (latent_dim-3):-5]
+                qz0_a_mean, qz0_a_logvar = out[:,-5:-4], out[:,-4:-3]
+                qz0_b_mean, qz0_b_logvar = out[:,-3:-2], out[:,-2:-1]
+                qz0_dir = out[:, -1:]
+                
+                epsilon = torch.randn(qz0_mean.size()).to(device)
+                z0 = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
+
+                epsilon_a = torch.randn(qz0_a_mean.size()).to(device)
+                z0_a = epsilon_a * torch.exp(.5 * qz0_a_logvar) + qz0_a_mean
+
+                epsilon_b = torch.randn(qz0_b_mean.size()).to(device)
+                z0_b = epsilon_b * torch.exp(.5 * qz0_b_logvar) + qz0_b_mean
+                
+                z0_dir = torch.sigmoid(qz0_dir)
+                
+                pred_dir = (z0_dir > .5).to(z0_dir)
+                
+                z0 = torch.cat((z0, z0_a, z0_b, z0_dir), dim=1) # 5
+                
+            else:
+                qz0_mean, qz0_logvar = out[:, :latent_dim], out[:, latent_dim:]
+                
+                epsilon = torch.randn(qz0_mean.size()).to(device)
+                z0 = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
+                
+            if args.sup:
+                loss_sysid = log_normal_pdf(theta[:,:1].to(qz0_a_mean), qz0_a_mean, qz0_a_logvar).sum(-1).sum(-1) + log_normal_pdf(theta[:,1:2].to(qz0_b_mean), qz0_b_mean, qz0_b_logvar).sum(-1).sum(-1) + torch.mean(BCEloss(qz0_dir, theta[:, 2:].to(qz0_dir)), dim=0).sum(-1)
 
             # forward in time and solve ode for reconstructions
             pred_z = odeint(func, z0, samp_ts).permute(1, 0, 2)
@@ -355,18 +401,33 @@ if __name__ == '__main__':
                 samp_trajs, pred_x, noise_logvar).sum(-1).sum(-1)
             
             if args.cond:
-                pz0 = conditioner(theta.to(pred_theta).view(1,n_sys_params)).repeat(z0.shape[0],1)
-                pz0_mean, pz0_logvar = split_feature(pz0, type="split")
+                pz0 = conditioner(theta.to(out))
+            elif args.softcond:
+                prior_vec = torch.tensor([a_range[0], a_range[1], b_range[0], b_range[1], pi_dir]).repeat(z0.size()[0],1).to(device)
+                pz0 = soft_conditioner(prior_vec)
+                
+            if args.softcond or args.cond:
+                pz0_mean = pz0_logvar = torch.zeros([z0.size()[0],  z0.size()[1] - 3]).to(device)  
+                pz0_a_mean = pz0[:,:1, ...]
+                pz0_a_logvar = pz0[:,1:2, ...]
+                pz0_b_mean = pz0[:,2:3, ...]
+                pz0_b_logvar = pz0[:,3:4, ...]
+                pz0_dir = torch.sigmoid(pz0[:,4:, ...])
+            elif args.sup:
+                pz0_mean = pz0_logvar = torch.zeros([z0.size()[0],  z0.size()[1] - 3]).to(device)
             else:
                 pz0_mean = pz0_logvar = torch.zeros(z0.size()).to(device)
             
-            analytic_kl = normal_kl(qz0_mean, qz0_logvar,
-                                    pz0_mean, pz0_logvar).sum(-1)
+            if args.softcond or args.cond:
+                analytic_kl = normal_kl(qz0_mean, qz0_logvar, pz0_mean, pz0_logvar).sum(-1) + normal_kl(qz0_a_mean, qz0_a_logvar, pz0_a_mean, pz0_a_logvar).sum(-1) + normal_kl(qz0_b_mean, qz0_b_logvar, pz0_b_mean, pz0_b_logvar).sum(-1) + BCEloss(qz0_dir, pz0_dir).sum(-1)
+            else:
+                analytic_kl = normal_kl(qz0_mean, qz0_logvar,
+                                        pz0_mean, pz0_logvar).sum(-1)
                 
-            loss_elbo = torch.mean(-logpx + analytic_kl, dim=0)
+            loss_elbo = torch.mean(-logpx + args.beta * analytic_kl, dim=0)
             
             if args.sup: 
-                loss = loss_elbo + loss_sysid
+                loss = loss_elbo + args.w_sup * loss_sysid
             else:
                 loss = loss_elbo
                 
@@ -374,10 +435,15 @@ if __name__ == '__main__':
             optimizer.step()
             loss_meter.update(loss.item())
             loss_elbo_meter.update(loss_elbo.item())
-            if args.sup:loss_sysid_meter.update(loss_sysid.item())
+            if args.sup:
+                loss_sysid_meter.update(loss_sysid.item())
+                params_error = l2loss(qz0_a_mean, theta[:,:1].to(qz0_a_mean)) + l2loss(qz0_b_mean, theta[:,1:2].to(qz0_b_mean))
+                params_meter.update(params_error.item())
+                dir_error = torch.mean((pred_dir != theta[:, 2:].to(pred_dir)).to(pred_dir), dim=0).sum(-1)
+                dir_meter.update(dir_error.item())
                 
-            if args.sup: 
-                print('Iter: {}, running avg loss: {:.4f}, running avg elbo: {:.4f}, running avg sysid: {:.4f}, sysid: {:.4f}, {:.4f}, sysid_truth: {:.4f}, {:.4f}'.format(itr, loss_meter.avg, -loss_elbo_meter.avg, loss_sysid_meter.avg, pred_theta[:,0].mean().cpu().detach().numpy(), pred_theta[:,1].mean().cpu().detach().numpy(), theta[0].cpu().numpy(), theta[1].cpu().numpy()))
+            if args.sup:
+                print('Iter: {}, running avg loss: {:.4f}, running avg elbo: {:.4f}, running avg sysid: {:.4f}, running avg error params: {:.4f}, running avg error dir: {:.4f}, sysid: ({:.4f}, {:.4f}, {:.4f}) ({:.4f}, {:.4f}, {:.4f}) ({:.4f}, {:.4f}, {:.4f}), sysid_truth: ({:.4f}, {:.4f}, {:.4f}) ({:.4f}, {:.4f}, {:.4f}) ({:.4f}, {:.4f}, {:.4f})'.format(itr, loss_meter.avg, -loss_elbo_meter.avg, loss_sysid_meter.avg, params_meter.avg, dir_meter.avg, qz0_a_mean[0,0].cpu().detach().numpy(), qz0_b_mean[0,0].cpu().detach().numpy(), pred_dir[0,0].cpu().detach().numpy(), qz0_a_mean[10,0].cpu().detach().numpy(), qz0_b_mean[10,0].cpu().detach().numpy(), pred_dir[10,0].cpu().detach().numpy(), qz0_a_mean[20,0].cpu().detach().numpy(), qz0_b_mean[20,0].cpu().detach().numpy(), pred_dir[20,0].cpu().detach().numpy(), theta[0,0].cpu().numpy(), theta[0,1].cpu().numpy(), theta[0,2].cpu().numpy(), theta[10,0].cpu().numpy(), theta[10,1].cpu().numpy(), theta[10,2].cpu().numpy(), theta[20,0].cpu().numpy(), theta[20,1].cpu().numpy(), theta[20,2].cpu().numpy()))
             else:
                 print('Iter: {}, running avg elbo: {:.4f}'.format(itr, -loss_meter.avg))
 
@@ -395,6 +461,44 @@ if __name__ == '__main__':
                 'samp_ts': samp_ts,
             }, ckpt_path)
             print('Stored ckpt at {}'.format(ckpt_path))
+            
+    ckpt_path = os.path.join(args.savedir, 'ckpt.pth')
+    if args.cond:
+        torch.save({
+            'func_state_dict': func.state_dict(),
+            'rec_state_dict': rec.state_dict(),
+            'dec_state_dict': dec.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'conditioner_state_dict': conditioner.state_dict(),
+            'orig_trajs': orig_trajs,
+            'samp_trajs': samp_trajs,
+            'orig_ts': orig_ts,
+            'samp_ts': samp_ts,
+        }, ckpt_path)
+    elif args.softcond:
+        torch.save({
+            'func_state_dict': func.state_dict(),
+            'rec_state_dict': rec.state_dict(),
+            'dec_state_dict': dec.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'soft_conditioner_state_dict': soft_conditioner.state_dict(),
+            'orig_trajs': orig_trajs,
+            'samp_trajs': samp_trajs,
+            'orig_ts': orig_ts,
+            'samp_ts': samp_ts,
+        }, ckpt_path)
+    else:
+        torch.save({
+            'func_state_dict': func.state_dict(),
+            'rec_state_dict': rec.state_dict(),
+            'dec_state_dict': dec.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'orig_trajs': orig_trajs,
+            'samp_trajs': samp_trajs,
+            'orig_ts': orig_ts,
+            'samp_ts': samp_ts,
+        }, ckpt_path)
+    print('Stored ckpt at {}'.format(ckpt_path))
     print('Training complete after {} iters.'.format(itr))
     
     
@@ -405,15 +509,42 @@ if __name__ == '__main__':
             for t in reversed(range(samp_trajs.size(1))):
                 obs = samp_trajs[:, t, :]
                 out, h = rec.forward(obs, h)
-            qz0_mean, qz0_logvar = out[:, :latent_dim], out[:, latent_dim:]
-            if args.sup:
-                pred_theta = regressor(qz0_mean)
-                loss_sysid = l2loss(pred_theta, theta.to(pred_theta))
-                print('%s:'%suffix)
-                print('loss sysid: {:.4f}, sysid: {:.4f}, {:.4f}, sysid_truth: {:.4f}, {:.4f}'.format(loss_sysid, pred_theta[:,0].mean().cpu().detach().numpy(), pred_theta[:,1].mean().cpu().detach().numpy(), theta[0].cpu().numpy(), theta[1].cpu().numpy()))
                 
-            epsilon = torch.randn(qz0_mean.size()).to(device)
-            z0 = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
+            if args.softcond or args.sup or args.cond:
+                qz0_mean, qz0_logvar = out[:, :(latent_dim-3)], out[:, (latent_dim-3):-5]
+                qz0_a_mean, qz0_a_logvar = out[:,-5:-4], out[:,-4:-3]
+                qz0_b_mean, qz0_b_logvar = out[:,-3:-2], out[:,-2:-1]
+                qz0_dir = out[:, -1:]
+                
+                epsilon = torch.randn(qz0_mean.size()).to(device)
+                z0 = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
+
+                epsilon_a = torch.randn(qz0_a_mean.size()).to(device)
+                z0_a = epsilon_a * torch.exp(.5 * qz0_a_logvar) + qz0_a_mean
+
+                epsilon_b = torch.randn(qz0_b_mean.size()).to(device)
+                z0_b = epsilon_b * torch.exp(.5 * qz0_b_logvar) + qz0_b_mean
+                
+                z0_dir = torch.sigmoid(qz0_dir)
+                
+                pred_dir = (z0_dir > .5).to(z0_dir)
+                
+                z0 = torch.cat((z0, z0_a, z0_b, z0_dir), dim=1)
+            
+            else:
+                qz0_mean, qz0_logvar = out[:, :latent_dim], out[:, latent_dim:]
+                
+                epsilon = torch.randn(qz0_mean.size()).to(device)
+                z0 = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
+            
+            if args.sup:
+                loss_sysid = log_normal_pdf(theta[:,:1].to(qz0_a_mean), qz0_a_mean, qz0_a_logvar).sum(-1).sum(-1) + log_normal_pdf(theta[:,1:2].to(qz0_b_mean), qz0_b_mean, qz0_b_logvar).sum(-1).sum(-1) + torch.mean(BCEloss(qz0_dir, theta[:, 2:].to(qz0_dir)), dim=0).sum(-1)
+                params_error = l2loss(qz0_a_mean, theta[:,:1].to(qz0_a_mean)) + l2loss(qz0_b_mean, theta[:,1:2].to(qz0_b_mean))
+                dir_error = torch.mean((pred_dir != theta[:, 2:].to(pred_dir)).to(pred_dir), dim=0).sum(-1)
+                
+                print('%s:'%suffix)
+                print('loss sysid: {:.4f}, error params: {:.4f}, error dir: {:.4f}, sysid: ({:.4f}, {:.4f}, {:.4f}) ({:.4f}, {:.4f}, {:.4f}) ({:.4f}, {:.4f}, {:.4f}), sysid_truth: ({:.4f}, {:.4f}, {:.4f}) ({:.4f}, {:.4f}, {:.4f}) ({:.4f}, {:.4f}, {:.4f})'.format(loss_sysid, params_error, dir_error, qz0_a_mean[0,0].cpu().detach().numpy(), qz0_b_mean[0,0].cpu().detach().numpy(), pred_dir[0,0].cpu().detach().numpy(), qz0_a_mean[10,0].cpu().detach().numpy(), qz0_b_mean[10,0].cpu().detach().numpy(), pred_dir[10,0].cpu().detach().numpy(), qz0_a_mean[20,0].cpu().detach().numpy(), qz0_b_mean[20,0].cpu().detach().numpy(), pred_dir[20,0].cpu().detach().numpy(), theta[0,0].cpu().numpy(), theta[0,1].cpu().numpy(), theta[0,2].cpu().numpy(), theta[10,0].cpu().numpy(), theta[10,1].cpu().numpy(), theta[10,2].cpu().numpy(), theta[20,0].cpu().numpy(), theta[20,1].cpu().numpy(), theta[20,2].cpu().numpy()))
+                
             orig_ts = torch.from_numpy(orig_ts).float().to(device)
 
             # take first trajectory for visualization
