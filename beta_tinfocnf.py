@@ -388,7 +388,8 @@ if __name__ == '__main__':
                 z0 = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
                 
             if args.sup:
-                loss_sysid = log_normal_pdf(theta[:,:1].to(qz0_a_mean), qz0_a_mean, qz0_a_logvar).sum(-1).sum(-1) + log_normal_pdf(theta[:,1:2].to(qz0_b_mean), qz0_b_mean, qz0_b_logvar).sum(-1).sum(-1) + torch.mean(BCEloss(qz0_dir, theta[:, 2:].to(qz0_dir)), dim=0).sum(-1)
+                loss_sysid = l2loss(theta[:,:1].to(qz0_a_mean), qz0_a_mean) + l2loss(theta[:,1:2].to(qz0_b_mean), qz0_b_mean) + torch.mean(BCEloss(qz0_dir, theta[:, 2:].to(qz0_dir)), dim=0).sum(-1)
+#                 loss_sysid = log_normal_pdf(theta[:,:1].to(qz0_a_mean), qz0_a_mean, qz0_a_logvar).sum(-1).sum(-1) + log_normal_pdf(theta[:,1:2].to(qz0_b_mean), qz0_b_mean, qz0_b_logvar).sum(-1).sum(-1) + torch.mean(BCEloss(qz0_dir, theta[:, 2:].to(qz0_dir)), dim=0).sum(-1)
 
             # forward in time and solve ode for reconstructions
             pred_z = odeint(func, z0, samp_ts).permute(1, 0, 2)
@@ -502,7 +503,7 @@ if __name__ == '__main__':
     print('Training complete after {} iters.'.format(itr))
     
     
-    def eval_performance(samp_trajs, orig_ts, orig_trajs, theta, num_evals, suffix):
+    def eval_performance(samp_trajs, orig_trajs, theta, num_evals, suffix):
         with torch.no_grad():
             # sample from trajectorys' approx. posterior
             h = rec.initHidden().to(device)
@@ -538,14 +539,12 @@ if __name__ == '__main__':
                 z0 = epsilon * torch.exp(.5 * qz0_logvar) + qz0_mean
             
             if args.sup:
-                loss_sysid = log_normal_pdf(theta[:,:1].to(qz0_a_mean), qz0_a_mean, qz0_a_logvar).sum(-1).sum(-1) + log_normal_pdf(theta[:,1:2].to(qz0_b_mean), qz0_b_mean, qz0_b_logvar).sum(-1).sum(-1) + torch.mean(BCEloss(qz0_dir, theta[:, 2:].to(qz0_dir)), dim=0).sum(-1)
+                loss_sysid = l2loss(theta[:,:1].to(qz0_a_mean), qz0_a_mean) + l2loss(theta[:,1:2].to(qz0_b_mean), qz0_b_mean) + torch.mean(BCEloss(qz0_dir, theta[:, 2:].to(qz0_dir)), dim=0).sum(-1)
                 params_error = l2loss(qz0_a_mean, theta[:,:1].to(qz0_a_mean)) + l2loss(qz0_b_mean, theta[:,1:2].to(qz0_b_mean))
                 dir_error = torch.mean((pred_dir != theta[:, 2:].to(pred_dir)).to(pred_dir), dim=0).sum(-1)
                 
                 print('%s:'%suffix)
                 print('loss sysid: {:.4f}, error params: {:.4f}, error dir: {:.4f}, sysid: ({:.4f}, {:.4f}, {:.4f}) ({:.4f}, {:.4f}, {:.4f}) ({:.4f}, {:.4f}, {:.4f}), sysid_truth: ({:.4f}, {:.4f}, {:.4f}) ({:.4f}, {:.4f}, {:.4f}) ({:.4f}, {:.4f}, {:.4f})'.format(loss_sysid, params_error, dir_error, qz0_a_mean[0,0].cpu().detach().numpy(), qz0_b_mean[0,0].cpu().detach().numpy(), pred_dir[0,0].cpu().detach().numpy(), qz0_a_mean[10,0].cpu().detach().numpy(), qz0_b_mean[10,0].cpu().detach().numpy(), pred_dir[10,0].cpu().detach().numpy(), qz0_a_mean[20,0].cpu().detach().numpy(), qz0_b_mean[20,0].cpu().detach().numpy(), pred_dir[20,0].cpu().detach().numpy(), theta[0,0].cpu().numpy(), theta[0,1].cpu().numpy(), theta[0,2].cpu().numpy(), theta[10,0].cpu().numpy(), theta[10,1].cpu().numpy(), theta[10,2].cpu().numpy(), theta[20,0].cpu().numpy(), theta[20,1].cpu().numpy(), theta[20,2].cpu().numpy()))
-                
-            orig_ts = torch.from_numpy(orig_ts).float().to(device)
 
             # take first trajectory for visualization
             for i in range(num_evals):
@@ -587,7 +586,7 @@ if __name__ == '__main__':
 
     if args.visualize:
         # eval performance on train set
-        eval_performance(samp_trajs, orig_ts, orig_trajs, theta, num_evals, 'train')
+        eval_performance(samp_trajs, orig_trajs, theta, num_evals, 'train')
         # eval performance on test set
-        eval_performance(samp_trajs_test, orig_ts_test, orig_trajs_test, theta_test, num_evals, 'test')
+        eval_performance(samp_trajs_test, orig_trajs_test, theta_test, num_evals, 'test')
         

@@ -676,6 +676,53 @@ if __name__ == "__main__":
     tt_meter = utils.RunningAverageMeter(0.97)
     nll_marginal_meter = utils.RunningAverageMeter(0.97) # track negative marginal log-likelihood
     
+#     if args.load_dir is not None:
+#         model = create_model(args, data_shape, regularization_fns)
+#         infile = os.path.join(args.load_dir,"epoch_%i_checkpt.pth"%args.resume_load)
+#         print(infile)
+#         checkpt = torch.load(infile, map_location=lambda storage, loc: storage)
+#         model.load_state_dict(checkpt["state_dict"])
+        
+#         atol_list = []
+#         for i in range(14):
+#             atol_list.append([])
+            
+#         if torch.cuda.is_available():
+#             model = torch.nn.DataParallel(model).cuda()
+            
+#         train_loader = get_train_loader(train_set, 0)
+                
+#         model.eval()
+            
+#         with torch.no_grad():
+#             logger.info("validating...")
+#             losses = []
+#             for (x, y) in train_loader:
+#                 if args.data == "colormnist":
+#                     y = y[0]
+                        
+#                 if not args.conv:
+#                     x = x.view(x.shape[0], -1)
+#                 x = cvt(x)
+#                 loss_nll, loss_xent, y_predicted, atol, rtol, logp_actions, nfe, loss_nll_marginal = compute_bits_per_dim_conditional(x, y, model)
+#                 for tol_indx in range(len(atol)):
+#                     atol_list[tol_indx].append(atol[tol_indx])
+                
+#                 # losses.append(nll.cpu().numpy())
+                    
+#             # loss = np.mean(losses)
+#             # writer.add_scalars('nll_marginal', {'validation': loss}, i)
+#             tol_mean = []
+#             tol_std = []
+#             for tol_indx in range(len(atol_list)):
+#                 tol_mean.append(((torch.cat(atol_list[tol_indx])).cpu().numpy()).mean())
+#                 tol_std.append(((torch.cat(atol_list[tol_indx])).cpu().numpy()).std())
+        
+#         print(tol_mean)
+#         print(tol_std)
+        
+#         raise SystemExit(0)
+    
     if args.load_dir is not None:
         filelist = glob.glob(os.path.join(args.load_dir,"*epoch_*_checkpt.pth"))
         all_indx = []
@@ -685,7 +732,11 @@ if __name__ == "__main__":
         indxmax = max(all_indx)
         indxstart = max(1, args.resume_load)
         
-        for i in range(indxstart,indxmax+1):
+        error_list = []
+        
+        #for i in range(indxstart,indxmax+1):
+        for i in range(indxstart,indxstart+1):
+            print(i)
             model = create_model(args, data_shape, regularization_fns)
             infile = os.path.join(args.load_dir,"epoch_%i_checkpt.pth"%i)
             print(infile)
@@ -700,6 +751,9 @@ if __name__ == "__main__":
             with torch.no_grad():
                 logger.info("validating...")
                 losses = []
+                losses_nll = []
+                losses_nfe = []
+                total_correct = 0
                 for (x, y) in test_loader:
                     if args.data == "colormnist":
                         y = y[0]
@@ -707,11 +761,29 @@ if __name__ == "__main__":
                     if not args.conv:
                         x = x.view(x.shape[0], -1)
                     x = cvt(x)
-                    nll = compute_marginal_bits_per_dim(x, y, model)
-                    losses.append(nll.cpu().numpy())
+                    loss_nll, loss_xent, y_predicted, atol, rtol, logp_actions, nfe, loss_nll_marginal = compute_bits_per_dim_conditional(x, y, model)
+                    # nll = compute_marginal_bits_per_dim(x, y, model)
+                    total_correct += np.sum(y_predicted.astype(int) == y.numpy())
+                    losses_nll.append(loss_nll.cpu().numpy())
+                    losses_nfe.append(count_nfe_gate(model))
+                    # losses.append(nll.cpu().numpy())
                     
-                loss = np.mean(losses)
-                writer.add_scalars('nll_marginal', {'validation': loss}, i)
+                # loss = np.mean(losses)
+                error_score =  1. - total_correct / len(test_loader.dataset)
+                error_list.append(error_score)
+                loss_nll = np.mean(losses_nll)
+                loss_nfe = np.mean(losses_nfe)
+                
+                # writer.add_scalars('nll_marginal', {'validation': loss}, i)
+        
+        print('test_bs')
+        print(args.test_batch_size)
+        print('Error')
+        print(error_list)
+        print('NLL')
+        print(loss_nll)
+        print('NFE')
+        print(loss_nfe)
         
         raise SystemExit(0)
     

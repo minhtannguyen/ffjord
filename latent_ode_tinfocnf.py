@@ -434,29 +434,29 @@ if __name__ == '__main__':
                 orig_traj = orig_trajs[i].cpu().numpy()
                 samp_traj = samp_trajs[i].cpu().numpy()
 
-                plt.figure()
-                plt.plot(orig_traj[:, 0], orig_traj[:, 1], 'g', label='true trajectory')
-                plt.plot(xs_pos[:, 0], xs_pos[:, 1], 'r', label='learned trajectory (t>0)')
-                plt.plot(xs_neg[:, 0], xs_neg[:, 1], 'c', label='learned trajectory (t<0)')
-                plt.scatter(samp_traj[:, 0], samp_traj[:, 1], label='sampled data', s=3)
-                plt.legend()
-                plt.axis('equal')
-                plt.savefig(savefile + '_%s_%i.png'%(suffix,i), dpi=500)
-                plt.close()
+#                 plt.figure()
+#                 plt.plot(orig_traj[:, 0], orig_traj[:, 1], 'g', label='true trajectory')
+#                 plt.plot(xs_pos[:, 0], xs_pos[:, 1], 'r', label='learned trajectory (t>0)')
+#                 plt.plot(xs_neg[:, 0], xs_neg[:, 1], 'c', label='learned trajectory (t<0)')
+#                 plt.scatter(samp_traj[:, 0], samp_traj[:, 1], label='sampled data', s=3)
+#                 plt.axis('equal')
+#                 plt.savefig(savefile + '_%s_%i.png'%(suffix,i), dpi=500)
+#                 plt.close()
                 
                 plt.figure()
                 plt.plot(orig_traj[:, 0], orig_traj[:, 1], 'g', label='true trajectory')
                 plt.plot(xs_pos[:, 0], xs_pos[:, 1], 'r', label='learned trajectory (t>0)')
                 plt.scatter(samp_traj[:, 0], samp_traj[:, 1], label='sampled data', s=3)
-                plt.legend()
                 plt.axis('equal')
+                plt.xlim(-1, 12)
+                plt.ylim(-6, 6)     
                 plt.savefig(savefile + '_pos_%s_%i.png'%(suffix,i), dpi=500)
                 
                 print('Saved visualization figure at {}'.format(savefile + '_%s_%i.png'%(suffix,i)))
 
     if args.visualize:
         # eval performance on train set
-        eval_performance(samp_trajs, orig_ts, orig_trajs, theta, num_evals, 'train')
+        # eval_performance(samp_trajs, orig_ts, orig_trajs, theta, num_evals, 'train')
         # eval performance on test set
         eval_performance(samp_trajs_test, orig_ts_test, orig_trajs_test, theta_test, num_evals, 'test')
         
